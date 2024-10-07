@@ -17,6 +17,7 @@ from utils import set_seed
 from scipy.stats import wilcoxon
 import copy
 from itertools import combinations
+import shap
 
 # Ignore warnings
 warnings.filterwarnings("ignore")
@@ -49,7 +50,108 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
     assert split_method in ['kfold', 'leaveoneout']
     if split_method == 'leaveoneout':
         num_splits = preprocessor.get_number_of_samples()
-        # Handle leave-one-out separately (not covered here)
+        # Initialize lists to store y_true, y_prob, y_pred for LOOCV
+        y_true_list = []
+        y_prob_list = []
+        y_pred_list = []
+        
+        for split_index in range(num_splits):
+            # Split the data
+            preprocessor.split_data(method='leaveoneout', split_index=split_index)
+            X_train, X_test, y_train, y_test = preprocessor.get_dataset()
+            
+            # Ensure the labels are integers
+            y_train, y_test = y_train.astype(int), y_test.astype(int)
+            
+            # Apply PCA if requested
+            if use_pca:
+                pca = PCA(n_components=n_components)
+                X_train = pca.fit_transform(X_train)
+                X_test = pca.transform(X_test)
+                # Update feature names to principal components
+                feature_names = [f'PC_{i+1}' for i in range(X_train.shape[1])]
+            else:
+                # Get feature names
+                if feature_names is None:
+                    if isinstance(X_train, pd.DataFrame):
+                        feature_names = X_train.columns.tolist()
+                    else:
+                        feature_names = [f'Feature_{i}' for i in range(X_train.shape[1])]
+            
+            # Fit the classifier
+            clf.fit(X_train, y_train)
+            
+            # Get classifier outputs on training data
+            if hasattr(clf, "predict_proba"):
+                y_prob_train = clf.predict_proba(X_train)[:, 1]
+            else:  # For classifiers that do not have predict_proba (e.g., SVM)
+                y_prob_train = clf.decision_function(X_train)
+            
+            # Initialize calibrator
+            if calibrator == 'platt':
+                calib_model = PlattScaling()
+                calib_model.fit(y_prob_train.reshape(-1, 1), y_train)
+                # Calibrated probabilities on training data
+                y_prob_train_cal = calib_model.predict_proba(y_prob_train.reshape(-1, 1))[:, 1]
+            elif calibrator == 'isotonic':
+                calib_model = IsotonicRegression(out_of_bounds='clip')
+                calib_model.fit(y_prob_train, y_train)
+                y_prob_train_cal = calib_model.predict(y_prob_train)
+            else:  # 'none'
+                y_prob_train_cal = y_prob_train
+            
+            # Compute optimal threshold on calibrated training data
+            fpr, tpr, thresholds = roc_curve(y_train, y_prob_train_cal)
+            optimal_idx = np.argmax(tpr - fpr)
+            optimal_threshold = thresholds[optimal_idx]
+            
+            # Get classifier outputs on test data
+            if hasattr(clf, "predict_proba"):
+                y_prob = clf.predict_proba(X_test)[:, 1]
+            else:
+                y_prob = clf.decision_function(X_test)
+            
+            # Apply calibrator to test data
+            if calibrator == 'platt':
+                y_prob_cal = calib_model.predict_proba(y_prob.reshape(-1, 1))[:, 1]
+            elif calibrator == 'isotonic':
+                y_prob_cal = calib_model.predict(y_prob)
+            else:  # 'none'
+                y_prob_cal = y_prob
+            
+            # Make predictions using the optimal threshold
+            y_pred = (y_prob_cal >= optimal_threshold).astype(int)
+            
+            # Store y_test, y_prob_cal, y_pred
+            y_true_list.append(y_test)
+            y_prob_list.append(y_prob_cal)
+            y_pred_list.append(y_pred)
+            
+            # Optionally, store model information
+            # model_info = {
+            #     'split_index': split_index,
+            #     'model': copy.deepcopy(clf),
+            #     'calibrator': copy.deepcopy(calib_model) if calibrator != 'none' else None,
+            #     'pca': copy.deepcopy(pca) if use_pca else None
+            # }
+            # model_list.append(model_info)
+        
+        # After all splits
+        # Concatenate y_true_list, y_prob_list, y_pred_list
+        y_true_all = np.concatenate(y_true_list)
+        y_prob_all = np.concatenate(y_prob_list)
+        y_pred_all = np.concatenate(y_pred_list)
+        
+        # Compute metrics
+        metrics = compute_metrics(y_true_all, y_pred_all, y_prob_all)
+        metrics_list.append(metrics)
+        auroc_list.append(metrics['AUROC'])
+        
+        # Print metrics
+        print("Metrics over Leave-One-Out Cross-Validation:")
+        print(pd.Series(metrics))
+        
+        return metrics_list, auroc_list, model_list, feature_names
     
     if split_method == 'kfold':
         num_CVs = num_splits // kfold
@@ -223,13 +325,72 @@ def compute_feature_importance(clf_name, clf, preprocessor, feature_names, use_p
     importances_df = importances_df.sort_values(by='Importance', ascending=False)
     print(importances_df.head(20).to_string(index=False))
 
+
+def compute_shap_feature_importance(clf_name, clf, preprocessor, feature_names, use_pca=False, n_components=None):
+    # Train the classifier on the whole dataset
+    preprocessor.split_data(method='full')
+    X_train, _, y_train, _ = preprocessor.get_dataset()
+    y_train = y_train.astype(int)
+    
+    # Apply PCA if requested
+    if use_pca:
+        pca = PCA(n_components=n_components)
+        X_train = pca.fit_transform(X_train)
+        # Update feature names to principal components
+        feature_names = [f'PC_{i+1}' for i in range(X_train.shape[1])]
+    
+    # Fit the classifier on the whole dataset
+    clf.fit(X_train, y_train)
+    
+    print(f"\nTop 20 Most Important Features for {clf_name} using SHAP values trained on the whole dataset{' with PCA' if use_pca else ''}:")
+    
+    # Compute SHAP values
+    try:
+        if clf_name.startswith('Logistic_Regression'):
+            # Use LinearExplainer for linear models
+            explainer = shap.LinearExplainer(clf, X_train)
+            shap_values = explainer.shap_values(X_train)
+        elif clf_name.startswith('Random_Forest') or clf_name.startswith('XGBoost'):
+            # Use TreeExplainer for tree-based models
+            explainer = shap.TreeExplainer(clf)
+            shap_values = explainer.shap_values(X_train)
+        elif clf_name.startswith('SVM'):
+            # SHAP computation for SVM using KernelExplainer can be computationally intensive
+            # For demonstration, we will skip it or you can sample a subset
+            print(f"SHAP value computation is computationally intensive for {clf_name}. Skipping.")
+            return
+        else:
+            print(f"No SHAP explainer available for classifier {clf_name}.")
+            return
+    except Exception as e:
+        print(f"Error computing SHAP values for {clf_name}: {e}")
+        return
+    
+    # For binary classification, shap_values can be a numpy array
+    # For multiclass, it's a list of arrays
+    if isinstance(shap_values, list):
+        # For binary classification, shap_values[1] corresponds to the positive class
+        shap_values = shap_values[1]
+    
+    # Aggregate the absolute SHAP values over the dataset to get feature importance
+    importances = np.abs(shap_values).mean(axis=0)
+    
+    # Create DataFrame of feature importances
+    importances_df = pd.DataFrame({
+        'Feature': feature_names,
+        'Importance': importances
+    })
+    importances_df = importances_df.sort_values(by='Importance', ascending=False)
+    print(importances_df.head(20).to_string(index=False))
+
+
 def main():
     # Set random seed for reproducibility
     set_seed(42)
     
     # Define the label name (e.g., 'DIED', 'HFNOV', 'MEVEN')
     label_name = 'DIED'
-    print(f"Label: {label_name}")
+    print(f"\nLabel: {label_name}")
     
     # Define classifiers
     classifiers = {
@@ -243,7 +404,7 @@ def main():
     calibrators = ['none', 'platt', 'isotonic']
     
     # PCA options
-    use_pca = True  # Set to True to enable PCA
+    use_pca = False  # Set to True to enable PCA
     n_components = 10  # Number of principal components to keep
     
     # Dictionaries to store results
@@ -252,11 +413,11 @@ def main():
     feature_names = None  # Initialize feature names
     
     # Split method
-    split_method = 'kfold'
-    # K for k-fold
+    split_method = 'leaveoneout'  # Set to 'leaveoneout' for Leave-One-Out CV
+    # K for k-fold (not used in leave-one-out)
     kfold = 5
-    # Number of splits
-    num_splits = 50  # This should be a multiple of kfold
+    # Number of splits (will be set inside the function for leave-one-out)
+    num_splits = None  # Set to None since it will be determined by the number of samples
     
     # Loop over classifiers and calibrators
     for calibrator in calibrators:
@@ -286,6 +447,12 @@ def main():
     for clf_name, clf in classifiers.items():
         if clf_name in ['Logistic_Regression', 'Random_Forest', 'XGBoost']:
             compute_feature_importance(clf_name, copy.deepcopy(clf), preprocessor, feature_names_full, use_pca, n_components)
+
+
+    # Compute feature importances using SHAP values
+    for clf_name, clf in classifiers.items():
+        compute_shap_feature_importance(clf_name, copy.deepcopy(clf), preprocessor, feature_names_full, use_pca, n_components)
+
     
 if __name__ == "__main__":
     main()

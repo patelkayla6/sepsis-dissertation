@@ -1,5 +1,5 @@
 import pandas as pd
-import numpy as np
+import numpy as np 
 from sklearn.model_selection import StratifiedKFold, LeaveOneOut
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error, r2_score
