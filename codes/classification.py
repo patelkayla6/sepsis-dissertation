@@ -8,37 +8,21 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from sklearn.ensemble import RandomForestClassifier
 from xgboost import XGBClassifier
-from sklearn.naive_bayes import GaussianNB
-from sklearn.neighbors import KNeighborsClassifier
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression as PlattScaling
+from sklearn.decomposition import PCA
 import warnings
 from dataset_preprocess import DataPreprocessor
 from utils import set_seed
 from scipy.stats import wilcoxon
 import copy
+from itertools import combinations
 
 # Ignore warnings
 warnings.filterwarnings("ignore")
 
-# Set random seed for reproducibility
-set_seed(42)
-
-# Define the label name (e.g., 'DIED', 'HFNOV', 'MEVEN')
-label_name = 'HFNOV'
-print(f"Label: {label_name}")
-
-# Define classifiers
-classifiers = {
-    'Naive_Bayes': GaussianNB(),
-    'K-Nearest_Neighbors': KNeighborsClassifier(),
-    'Logistic_Regression': LogisticRegression(max_iter=1000, random_state=42),
-    'SVM_(RBF_Kernel)': SVC(kernel='rbf', probability=True, random_state=42),
-    'Random_Forest': RandomForestClassifier(random_state=42),
-    'XGBoost': XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
-}
-
 # Function to compute evaluation metrics
-def compute_metrics(y_true, y_pred, y_prob, threshold=0.5):
-    y_pred = (y_prob >= threshold).astype(int)
+def compute_metrics(y_true, y_pred, y_prob):
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
     sensitivity = recall_score(y_true, y_pred)
@@ -53,122 +37,255 @@ def compute_metrics(y_true, y_pred, y_prob, threshold=0.5):
         'AUPRC': auprc
     }
 
-# Dictionary to store AUROC scores for each classifier
-auroc_scores = {}
-# Dictionary to store models and their test AUROC scores for each classifier
-models_info = {}
-
-# Loop over classifiers
-for clf_name, clf in classifiers.items():
-    print(f"\nClassifier: {clf_name}")
+def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', split_method='kfold', kfold=5, num_splits=50, use_pca=False, n_components=None):
+    print(f"\nClassifier: {clf_name} with Calibrator: {calibrator} {'with PCA' if use_pca else ''}")
     metrics_list = []
     auroc_list = []
     model_list = []
     feature_names = None  # Initialize feature names
-    for split in range(20):
-        # Initialize the data preprocessor
-        preprocessor = DataPreprocessor(split=split, label_name=label_name, missing_method='median', normalize=True)
-        X_train, X_test, y_train, y_test = preprocessor.get_dataset()
-        # Ensure the labels are integers
-        y_train, y_test = y_train.astype(int), y_test.astype(int)
-        
-        # Get feature names
-        if feature_names is None:
-            if isinstance(X_train, pd.DataFrame):
-                feature_names = X_train.columns.tolist()
-            else:
-                feature_names = [f'Feature_{i}' for i in range(X_train.shape[1])]
-        
-        # Fit the classifier
-        clf.fit(X_train, y_train)
-        # Make a copy of the trained model
-        model_copy = copy.deepcopy(clf)
-        
-        # Make predictions on the training set and find the optimal threshold
-        if hasattr(clf, "predict_proba"):
-            y_prob_train = clf.predict_proba(X_train)[:, 1]
-        else:  # For classifiers that do not have predict_proba (e.g., SVM)
-            y_prob_train = clf.decision_function(X_train)
-        fpr, tpr, thresholds = roc_curve(y_train, y_prob_train)
-        optimal_idx = np.argmax(tpr - fpr)
-        optimal_threshold = thresholds[optimal_idx]
-        
-        # Make predictions
-        if hasattr(clf, "predict_proba"):
-            y_prob = clf.predict_proba(X_test)[:, 1]
-        else:  # For classifiers that do not have predict_proba (e.g., SVM)
-            y_prob = clf.decision_function(X_test)
-        y_pred = (y_prob >= optimal_threshold).astype(int)
-        
-        # Compute metrics
-        metrics = compute_metrics(y_test, y_pred, y_prob, optimal_threshold)
-        metrics_list.append(metrics)
-        
-        # Store AUROC score
-        auroc_list.append(metrics['AUROC'])
-        
-        # Store model information
-        model_info = {
-            'split': split,
-            'model': model_copy,
-            'test_auroc': metrics['AUROC']
-        }
-        model_list.append(model_info)
-        
-    # Compute average metrics and standard deviation
-    avg_metrics = pd.DataFrame(metrics_list).mean()
-    std_metrics = pd.DataFrame(metrics_list).std()
-    print("Average Metrics over 20 folds:")
-    print(avg_metrics.round(4))
-    print("Standard Deviation over 20 folds:")
-    print(std_metrics.round(4))
+    # Initialize the data preprocessor
+    preprocessor = DataPreprocessor(label_name=label_name, missing_method='median', normalize=True)
     
-    # Store AUROC scores and model information
-    auroc_scores[clf_name] = auroc_list
-    models_info[clf_name] = model_list
+    assert split_method in ['kfold', 'leaveoneout']
+    if split_method == 'leaveoneout':
+        num_splits = preprocessor.get_number_of_samples()
+        # Handle leave-one-out separately (not covered here)
+    
+    if split_method == 'kfold':
+        num_CVs = num_splits // kfold
+        
+        for cv_num in range(num_CVs):
+            # Initialize lists to store y_true, y_prob, y_pred for this CV
+            y_true_cv = []
+            y_prob_cv = []
+            y_pred_cv = []
+            
+            for fold_num in range(kfold):
+                # Calculate split_index
+                split_index = cv_num * kfold + fold_num
+                
+                # Split the data
+                preprocessor.split_data(method='kfold', n_splits=kfold, split_index=split_index)
+                X_train, X_test, y_train, y_test = preprocessor.get_dataset()
+                
+                # Ensure the labels are integers
+                y_train, y_test = y_train.astype(int), y_test.astype(int)
+                
+                # Apply PCA if requested
+                if use_pca:
+                    pca = PCA(n_components=n_components)
+                    X_train = pca.fit_transform(X_train)
+                    X_test = pca.transform(X_test)
+                    # Update feature names to principal components
+                    feature_names = [f'PC_{i+1}' for i in range(X_train.shape[1])]
+                else:
+                    # Get feature names
+                    if feature_names is None:
+                        if isinstance(X_train, pd.DataFrame):
+                            feature_names = X_train.columns.tolist()
+                        else:
+                            feature_names = [f'Feature_{i}' for i in range(X_train.shape[1])]
+                
+                # Fit the classifier
+                clf.fit(X_train, y_train)
+                
+                # Get classifier outputs on training data
+                if hasattr(clf, "predict_proba"):
+                    y_prob_train = clf.predict_proba(X_train)[:, 1]
+                else:  # For classifiers that do not have predict_proba (e.g., SVM)
+                    y_prob_train = clf.decision_function(X_train)
+                
+                # Initialize calibrator
+                if calibrator == 'platt':
+                    calib_model = PlattScaling()
+                    calib_model.fit(y_prob_train.reshape(-1, 1), y_train)
+                    # Calibrated probabilities on training data
+                    y_prob_train_cal = calib_model.predict_proba(y_prob_train.reshape(-1, 1))[:, 1]
+                elif calibrator == 'isotonic':
+                    calib_model = IsotonicRegression(out_of_bounds='clip')
+                    calib_model.fit(y_prob_train, y_train)
+                    y_prob_train_cal = calib_model.predict(y_prob_train)
+                else:  # 'none'
+                    y_prob_train_cal = y_prob_train
+                
+                # Compute optimal threshold on calibrated training data
+                fpr, tpr, thresholds = roc_curve(y_train, y_prob_train_cal)
+                optimal_idx = np.argmax(tpr - fpr)
+                optimal_threshold = thresholds[optimal_idx]
+                
+                # Get classifier outputs on test data
+                if hasattr(clf, "predict_proba"):
+                    y_prob = clf.predict_proba(X_test)[:, 1]
+                else:
+                    y_prob = clf.decision_function(X_test)
+                
+                # Apply calibrator to test data
+                if calibrator == 'platt':
+                    y_prob_cal = calib_model.predict_proba(y_prob.reshape(-1, 1))[:, 1]
+                elif calibrator == 'isotonic':
+                    y_prob_cal = calib_model.predict(y_prob)
+                else:  # 'none'
+                    y_prob_cal = y_prob
+                
+                # Make predictions using the optimal threshold
+                y_pred = (y_prob_cal >= optimal_threshold).astype(int)
+                
+                # Store y_test, y_prob_cal, y_pred
+                y_true_cv.append(y_test)
+                y_prob_cv.append(y_prob_cal)
+                y_pred_cv.append(y_pred)
+                
+                # Optionally, store model information
+                # model_info = {
+                #     'cv_num': cv_num,
+                #     'fold_num': fold_num,
+                #     'model': copy.deepcopy(clf),
+                #     'calibrator': copy.deepcopy(calib_model) if calibrator != 'none' else None,
+                #     'pca': copy.deepcopy(pca) if use_pca else None
+                # }
+                # model_list.append(model_info)
+            
+            # After all folds in this CV
+            # Concatenate y_true_cv, y_prob_cv, y_pred_cv
+            y_true_cv = np.concatenate(y_true_cv)
+            y_prob_cv = np.concatenate(y_prob_cv)
+            y_pred_cv = np.concatenate(y_pred_cv)
+            
+            # Compute metrics
+            metrics = compute_metrics(y_true_cv, y_pred_cv, y_prob_cv)
+            metrics_list.append(metrics)
+            
+            # Store AUROC score
+            auroc_list.append(metrics['AUROC'])
+        
+        # Compute average metrics and standard deviation across CVs
+        avg_metrics = pd.DataFrame(metrics_list).mean()
+        std_metrics = pd.DataFrame(metrics_list).std()
+        # Combine mean and std into a single Series with formatted strings
+        combined_metrics = avg_metrics.round(4).astype(str) + ' ± ' + std_metrics.round(4).astype(str)
+        print("Average Metrics over {} {}-fold cross-validations (mean ± std):".format(num_CVs, kfold))
+        print(combined_metrics)
+        
+        return metrics_list, auroc_list, model_list, feature_names
 
-# Perform statistical tests between classifiers
-auroc_df = pd.DataFrame(auroc_scores)
-from itertools import combinations
+def perform_statistical_tests(auroc_scores, classifiers_list):
+    # Perform statistical tests between classifiers
+    auroc_df = pd.DataFrame(auroc_scores)
+    p_values = pd.DataFrame(index=classifiers_list, columns=classifiers_list)
+    
+    print("\nP-values between classifiers based on AUROC scores:")
+    for clf1, clf2 in combinations(classifiers_list, 2):
+        # Perform Wilcoxon signed-rank test
+        stat, p = wilcoxon(auroc_df[clf1], auroc_df[clf2])
+        p_values.loc[clf1, clf2] = p
+        p_values.loc[clf2, clf1] = p  # Since it's symmetric
+        print(f"P-value between {clf1} and {clf2}: {p:.4f}")
+    
+    # For display purposes, fill diagonal with NaN
+    np.fill_diagonal(p_values.values, np.nan)
+    print("\nP-values matrix:")
+    print(p_values)
+    
+    return p_values
 
-classifiers_list = list(classifiers.keys())
-p_values = pd.DataFrame(index=classifiers_list, columns=classifiers_list)
+def compute_feature_importance(clf_name, clf, preprocessor, feature_names, use_pca=False, n_components=None):
+    # Train the classifier on the whole dataset
+    preprocessor.split_data(method='full')
+    X_train, _, y_train, _ = preprocessor.get_dataset()
+    y_train = y_train.astype(int)
+    
+    # Apply PCA if requested
+    if use_pca:
+        pca = PCA(n_components=n_components)
+        X_train = pca.fit_transform(X_train)
+        # Update feature names to principal components
+        feature_names = [f'PC_{i+1}' for i in range(X_train.shape[1])]
+    
+    # Fit the classifier on the whole dataset
+    clf.fit(X_train, y_train)
+    
+    print(f"\nTop 20 Most Important Features for {clf_name} trained on the whole dataset{' with PCA' if use_pca else ''}:")
+    # Get feature importances
+    if clf_name.startswith('Logistic_Regression'):
+        importances = np.abs(clf.coef_[0])
+    elif clf_name.startswith('Random_Forest'):
+        importances = clf.feature_importances_
+    elif clf_name.startswith('XGBoost'):
+        importances = clf.feature_importances_
+    else:
+        print(f"No feature importance available for classifier {clf_name}.")
+        return
+    # Create DataFrame of feature importances
+    importances_df = pd.DataFrame({
+        'Feature': feature_names,
+        'Importance': importances
+    })
+    importances_df = importances_df.sort_values(by='Importance', ascending=False)
+    print(importances_df.head(20).to_string(index=False))
 
-print("\nP-values between classifiers based on AUROC scores:")
-for clf1, clf2 in combinations(classifiers_list, 2):
-    # Perform Wilcoxon signed-rank test
-    stat, p = wilcoxon(auroc_df[clf1], auroc_df[clf2])
-    p_values.loc[clf1, clf2] = p
-    p_values.loc[clf2, clf1] = p  # Since it's symmetric
-    print(f"P-value between {clf1} and {clf2}: {p:.4f}")
-
-# For display purposes, fill diagonal with NaN
-np.fill_diagonal(p_values.values, np.nan)
-print("\nP-values matrix:")
-print(p_values)
-
-# For feature importance, pick the model trained on the split that has the highest AUROC on the test data
-for clf_name in classifiers:
-    if clf_name in ['Random_Forest', 'Logistic_Regression', 'XGBoost']:
-        model_list = models_info[clf_name]
-        # Convert model_list to DataFrame
-        model_df = pd.DataFrame(model_list)
-        # Find the index of the model with highest test_auroc
-        best_idx = model_df['test_auroc'].idxmax()
-        best_model_info = model_list[best_idx]
-        best_model = best_model_info['model']
-        print(f"\nTop 20 Most Important Features for {clf_name} (Split {best_model_info['split']} with highest AUROC):")
-        # Get feature importances
-        if clf_name == 'Logistic_Regression':
-            importances = np.abs(best_model.coef_[0])
-        elif clf_name == 'Random_Forest':
-            importances = best_model.feature_importances_
-        elif clf_name == 'XGBoost':
-            importances = best_model.feature_importances_
-        # Create DataFrame of feature importances
-        importances_df = pd.DataFrame({
-            'Feature': feature_names,
-            'Importance': importances
-        })
-        importances_df = importances_df.sort_values(by='Importance', ascending=False)
-        print(importances_df.head(20).to_string(index=False))
+def main():
+    # Set random seed for reproducibility
+    set_seed(42)
+    
+    # Define the label name (e.g., 'DIED', 'HFNOV', 'MEVEN')
+    label_name = 'DIED'
+    print(f"Label: {label_name}")
+    
+    # Define classifiers
+    classifiers = {
+        'Logistic_Regression': LogisticRegression(max_iter=1000, random_state=42),
+        'SVM_(RBF_Kernel)': SVC(kernel='rbf', probability=True, random_state=42),
+        'Random_Forest': RandomForestClassifier(random_state=42),
+        'XGBoost': XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
+    }
+    
+    # Calibrator options
+    calibrators = ['none', 'platt', 'isotonic']
+    
+    # PCA options
+    use_pca = True  # Set to True to enable PCA
+    n_components = 10  # Number of principal components to keep
+    
+    # Dictionaries to store results
+    auroc_scores = {}
+    models_info = {}
+    feature_names = None  # Initialize feature names
+    
+    # Split method
+    split_method = 'kfold'
+    # K for k-fold
+    kfold = 5
+    # Number of splits
+    num_splits = 50  # This should be a multiple of kfold
+    
+    # Loop over classifiers and calibrators
+    for calibrator in calibrators:
+        for clf_name, clf in classifiers.items():
+            combined_name = f"{clf_name}_{calibrator}{'_PCA' if use_pca else ''}"
+            metrics_list, auroc_list, model_list, feature_names = train_and_evaluate_classifier(
+                clf_name, copy.deepcopy(clf), label_name, calibrator, split_method, kfold, num_splits, use_pca, n_components)
+            # Store AUROC scores and model information
+            auroc_scores[combined_name] = auroc_list
+            models_info[combined_name] = model_list
+    
+    # Perform statistical tests between classifiers
+    classifiers_list = list(auroc_scores.keys())
+    p_values = perform_statistical_tests(auroc_scores, classifiers_list)
+    
+    # Compute feature importances using the classifier trained on the whole dataset
+    # Initialize the data preprocessor
+    preprocessor = DataPreprocessor(label_name=label_name, missing_method='median', normalize=True)
+    preprocessor.split_data(method='full')
+    X_full, _, y_full, _ = preprocessor.get_dataset()
+    y_full = y_full.astype(int)
+    if isinstance(X_full, pd.DataFrame):
+        feature_names_full = X_full.columns.tolist()
+    else:
+        feature_names_full = [f'Feature_{i}' for i in range(X_full.shape[1])]
+    
+    for clf_name, clf in classifiers.items():
+        if clf_name in ['Logistic_Regression', 'Random_Forest', 'XGBoost']:
+            compute_feature_importance(clf_name, copy.deepcopy(clf), preprocessor, feature_names_full, use_pca, n_components)
+    
+if __name__ == "__main__":
+    main()

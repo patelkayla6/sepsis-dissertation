@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, LeaveOneOut
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.impute import SimpleImputer
@@ -99,8 +99,7 @@ def load_excel():
 
 
 class DataPreprocessor:
-    def __init__(self, split=0, label_name='DIED', missing_method='median', normalize=True):
-        assert split in [i for i in range(20)]
+    def __init__(self, label_name='DIED', missing_method='median', normalize=True):
         assert label_name in ['DIED', 'HFNOV', 'MEVEN', 'OUTCOME', 'CULTURE_RESULT']
         assert missing_method in [None, 'median']
 
@@ -118,15 +117,44 @@ class DataPreprocessor:
         categorical_cols = self.features.select_dtypes(include=['object']).columns
         self.features = pd.get_dummies(self.features, columns=categorical_cols, dummy_na=False)
 
-        random_state = 42 if split<10 else 24
-        cv = StratifiedKFold(n_splits=10, shuffle=True, random_state=random_state)
-        train_index, test_index = list(cv.split(self.features, self.labels))[split%10]
-        self.X_train, self.X_test = self.features.iloc[train_index], self.features.iloc[test_index]
-        self.y_train, self.y_test = self.labels.iloc[train_index], self.labels.iloc[test_index]
+        # Initialize data splitting variables
+        self.X_train, self.X_test, self.y_train, self.y_test = None, None, None, None
 
-        if missing_method:
-            self.deal_with_missing(method=missing_method)
-        if normalize:
+        # Store missing_method and normalize for later use
+        self.missing_method, self.normalize = missing_method, normalize
+
+        # Store the number of samples
+        self.n_samples = len(self.labels)
+
+    def split_data(self, method='kfold', n_splits=10, split_index=0):
+        assert method in ['kfold', 'leaveoneout', 'full']
+        if method == 'kfold':
+            assert n_splits >= 2
+            cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=split_index//n_splits)
+            splits = list(cv.split(self.features, self.labels))
+            train_index, test_index = splits[split_index % n_splits]
+            self.X_train, self.X_test = self.features.iloc[train_index], self.features.iloc[test_index]
+            self.y_train, self.y_test = self.labels.iloc[train_index], self.labels.iloc[test_index]
+        elif method == 'leaveoneout':
+            cv = LeaveOneOut()
+            splits = list(cv.split(self.features, self.labels))
+            n_splits = len(splits)
+            assert split_index < n_splits, "split_index out of range for leave-one-out cross-validation"
+            train_index, test_index = splits[split_index]
+            self.X_train, self.X_test = self.features.iloc[train_index], self.features.iloc[test_index]
+            self.y_train, self.y_test = self.labels.iloc[train_index], self.labels.iloc[test_index]
+        elif method == 'full':
+            # Use the full dataset as the training set and create empty test sets
+            self.X_train = self.features.copy()
+            self.y_train = self.labels.copy()
+            self.X_test = pd.DataFrame(columns=self.features.columns)
+            self.y_test = pd.Series(dtype=self.labels.dtype)
+        else:
+            raise ValueError('Invalid method for data splitting')
+
+        if self.missing_method:
+            self.deal_with_missing(method=self.missing_method)
+        if self.normalize:
             self.normalize_features()
 
     def deal_with_missing(self, method='median'):
@@ -136,16 +164,19 @@ class DataPreprocessor:
             if len(numerical_cols) > 0:
                 self.num_imputer = SimpleImputer(strategy='median')
                 self.X_train[numerical_cols] = self.num_imputer.fit_transform(self.X_train[numerical_cols])
-                self.X_test[numerical_cols] = self.num_imputer.transform(self.X_test[numerical_cols])
+                if not self.X_test.empty:
+                    self.X_test[numerical_cols] = self.num_imputer.transform(self.X_test[numerical_cols])
 
             # Fill categorical columns with the mode of the training set
             categorical_cols = self.X_train.select_dtypes(include=['object', 'category']).columns
             if len(categorical_cols) > 0:
                 self.cat_imputer = SimpleImputer(strategy='most_frequent')
                 self.X_train[categorical_cols] = self.cat_imputer.fit_transform(self.X_train[categorical_cols])
-                self.X_test[categorical_cols] = self.cat_imputer.transform(self.X_test[categorical_cols])
+                if not self.X_test.empty:
+                    self.X_test[categorical_cols] = self.cat_imputer.transform(self.X_test[categorical_cols])
         else:
             raise ValueError('Invalid method to deal with missing values')
+
 
     def normalize_features(self):
         numerical_cols = self.X_train.select_dtypes(include=[np.number]).columns
@@ -154,8 +185,13 @@ class DataPreprocessor:
             self.scaler.fit(self.X_train[numerical_cols])
 
             self.X_train[numerical_cols] = self.scaler.transform(self.X_train[numerical_cols])
-            self.X_test[numerical_cols] = self.scaler.transform(self.X_test[numerical_cols])
-        
+            if not self.X_test.empty:
+                self.X_test[numerical_cols] = self.scaler.transform(self.X_test[numerical_cols])
+
 
     def get_dataset(self):
         return self.X_train, self.X_test, self.y_train, self.y_test
+
+    def get_number_of_samples(self):
+        """Returns the total number of samples available."""
+        return self.n_samples
