@@ -302,6 +302,9 @@ def compute_feature_importance(clf_name, clf, preprocessor, feature_names, use_p
         X_train = pca.fit_transform(X_train)
         # Update feature names to principal components
         feature_names = [f'PC_{i+1}' for i in range(X_train.shape[1])]
+        # # print explained_variance_ratio_
+        # print(pca.explained_variance_ratio_)
+        # print([sum(pca.explained_variance_ratio_[:i]) for i in range(1, 50)])
     
     # Fit the classifier on the whole dataset
     clf.fit(X_train, y_train)
@@ -404,8 +407,8 @@ def main():
     calibrators = ['none', 'platt', 'isotonic']
     
     # PCA options
-    use_pca = False  # Set to True to enable PCA
-    n_components = 10  # Number of principal components to keep
+    use_pca = True  # Set to True to enable PCA
+    n_components = 50  # Number of principal components to keep
     
     # Dictionaries to store results
     auroc_scores = {}
@@ -413,11 +416,11 @@ def main():
     feature_names = None  # Initialize feature names
     
     # Split method
-    split_method = 'leaveoneout'  # Set to 'leaveoneout' for Leave-One-Out CV
+    split_method = 'kfold'  # Set to 'leaveoneout' for Leave-One-Out CV
     # K for k-fold (not used in leave-one-out)
-    kfold = 5
+    kfold = 10
     # Number of splits (will be set inside the function for leave-one-out)
-    num_splits = None  # Set to None since it will be determined by the number of samples
+    num_splits = 200  # Set to None since it will be determined by the number of samples
     
     # Loop over classifiers and calibrators
     for calibrator in calibrators:
