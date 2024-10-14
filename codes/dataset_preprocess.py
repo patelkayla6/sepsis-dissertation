@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import numpy as np 
 from sklearn.model_selection import StratifiedKFold, LeaveOneOut
@@ -5,6 +6,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
+from ppg_preprocess import save_ppg_features
 
 # Path to the Excel file
 file_path = '../data/sepsis_01NVa_Sep2024_CHENYANG.xlsx'
@@ -83,6 +85,14 @@ def load_excel():
     features = features.merge(feature_ES, on='USUBJID', how='outer')
     features = features.merge(feature_CLI, on='USUBJID', how='outer')
     features = features.merge(feature_DAILY_VITAL, on='USUBJID', how='outer')
+
+    # Process ppg data for each patient
+    raw_path = f'../data/01NVa_Sepsis/RAW_DATA/'
+    patient_names = [f for f in os.listdir(raw_path)]
+    for usubjid in features['USUBJID']:
+        for patient in patient_names:
+            if usubjid in patient:
+                save_ppg_features(patient)
 
     # Load and process labels
     label_CLI = CLI[['USUBJID', 'DIED', 'HFNOV', 'MEVEN']]
