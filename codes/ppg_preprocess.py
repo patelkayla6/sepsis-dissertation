@@ -3,12 +3,22 @@ import numpy as np
 import neurokit2 as nk
 import os
 from datetime import datetime
+from sqi import ppg_quality
 
-def save_ppg_features(patient, time_window=120, sqi_threshold=0.5):
 
+def save_ppg_features(patient, time_window=20):
+    # patient example: "003-1001"
     # Load CSV data
-    # patient = '01Nva-003-1007'
-    path = f'../data/01NVa_Sepsis/RAW_DATA/{patient}/PPG/'
+    path = f'../data/01NVa_Sepsis/RAW_DATA/'
+    # find the folder name containing the patient name
+    for folder in os.listdir(path):
+        if patient in folder:
+            path = os.path.join(path, folder)
+            break
+    if path == f'../data/01NVa_Sepsis/RAW_DATA/':
+        print(f"Patient {patient} not found.")
+        return
+    path = os.path.join(path, 'PPG')
 
     # List all CSV files in the path
     ppg_files = [f for f in os.listdir(path) if f.endswith('.csv')]
@@ -58,71 +68,96 @@ def save_ppg_features(patient, time_window=120, sqi_threshold=0.5):
 
     # Extract PPG signal
     df_ppg = concatenated_df.copy()
-    ppg_signal = df_ppg["ppg"].values
 
-    # Clean the PPG signal before computing quality
-    ppg_cleaned = nk.ppg_clean(ppg_signal, sampling_rate=100)
-
-    # Compute PPG Quality Index on the cleaned signal
-    ppg_quality = nk.ppg_quality(ppg_cleaned, sampling_rate=100)
-
-    # Add cleaned PPG and Quality Index to df_ppg
-    df_ppg["PPG_Clean"] = ppg_cleaned
-    df_ppg["PPG_Quality"] = ppg_quality
-
-    # Only keep rows with Quality Index greater than 0.5 and update timestamps accordingly
-    df_ppg_filtered = df_ppg[df_ppg["PPG_Quality"] > sqi_threshold].reset_index(drop=True)
+    # Get the starting timestamp of the entire signal
+    start_time_ms = df_ppg["TIMESTAMP_MS"].min()
 
     # Compute time differences to identify gaps
-    df_ppg_filtered["Time_Diff"] = df_ppg_filtered["TIMESTAMP_MS"].diff().fillna(10)
-
+    df_ppg["Time_Diff"] = df_ppg["TIMESTAMP_MS"].diff().fillna(10)
     # Identify gaps (assuming sampling rate is 100 Hz, i.e., 10 ms between samples)
-    df_ppg_filtered["Gap"] = df_ppg_filtered["Time_Diff"] > 10
-
-    # Assign segment IDs to continuous high-quality data
-    df_ppg_filtered["Segment_ID"] = df_ppg_filtered["Gap"].cumsum()
-
-    # Calculate the start time for elapsed time calculation
-    start_time_ms = df_ppg_filtered["TIMESTAMP_MS"].iloc[0]
+    df_ppg["Gap"] = df_ppg["Time_Diff"] > 10
+    # Assign segment IDs to continuous data
+    df_ppg["Segment_ID"] = df_ppg["Gap"].cumsum()
 
     # Initialize list to store HRV metrics
     hrv_list = []
 
-    # Change window size from 10 seconds to 2 minutes (120 seconds)
-    window_size = time_window * 100  # 2 minutes window with 100 Hz sampling rate
+    sampling_rate = 100  # Hz
+    window_size = int(time_window * sampling_rate)  # Number of samples in 20 seconds
 
-    # Loop through each continuous segment
-    for segment_id, segment_df in df_ppg_filtered.groupby("Segment_ID"):
-        segment_length = len(segment_df)
-        num_windows = segment_length // window_size
+    # Loop over each continuous segment
+    for segment_id, segment_df in df_ppg.groupby("Segment_ID"):
+        segment_ppg = segment_df["ppg"].values
+        segment_timestamps = segment_df["TIMESTAMP_MS"].values
+        num_samples_segment = len(segment_ppg)
+        num_windows = num_samples_segment // window_size
         for i in range(num_windows):
             start_idx = i * window_size
             end_idx = start_idx + window_size
-            window_df = segment_df.iloc[start_idx:end_idx]
-            window_signal = window_df["PPG_Clean"].values
-            if len(window_signal) == window_size:
-                # Process the window to extract HRV metrics
-                # Find peaks in the PPG signal
-                peaks_dict = nk.ppg_findpeaks(window_signal, sampling_rate=100)
-                peaks = peaks_dict["PPG_Peaks"]
+            window_ppg = segment_ppg[start_idx:end_idx]
+            window_timestamps = segment_timestamps[start_idx:end_idx]
+            if len(window_ppg) == window_size:
+                # Use ppg_quality function to assess the window
+                quality_flag, ppg_p = ppg_quality(window_ppg, sampling_rate)
+                if quality_flag == 1:
+                    # Valid window
+                    # Find peaks in the PPG signal
+                    peaks_dict = nk.ppg_findpeaks(ppg_p, sampling_rate=sampling_rate)
+                    peaks = peaks_dict["PPG_Peaks"]
 
-                # Ensure there are enough peaks to compute HRV
-                if len(peaks) > 2:
-                    # Compute HRV metrics
-                    hrv_metrics = nk.hrv(peaks_dict, sampling_rate=100, show=False)
-                    
-                    # Add additional PPG features
-                    # Example: Pulse Amplitude Variability (PAV)
-                    pulse_amplitudes = window_signal[peaks]
-                    pav = np.std(pulse_amplitudes) / np.mean(pulse_amplitudes)
-                    hrv_metrics["PAV"] = pav
+                    # Ensure there are enough peaks to compute HRV
+                    if len(peaks) > 2:
+                        # Initialize hrv_metrics as empty DataFrame
+                        hrv_metrics = pd.DataFrame()
 
-                    # Calculate elapsed time in seconds from the start time
-                    time_elapsed_seconds = (window_df.iloc[0]["TIMESTAMP_MS"] - start_time_ms) / 1000.0
-                    hrv_metrics["Time_Elapsed_Seconds"] = time_elapsed_seconds
+                        # Try to compute time-domain HRV metrics
+                        try:
+                            hrv_time = nk.hrv_time(peaks_dict, sampling_rate=sampling_rate)
+                            hrv_metrics = pd.concat([hrv_metrics, hrv_time], axis=1)
+                        except Exception as e:
+                            print(f"HRV time calculation error: {e}")
 
-                    # Collect the hrv_metrics in a list
-                    hrv_list.append(hrv_metrics)
+                        # Try to compute frequency-domain HRV metrics
+                        try:
+                            hrv_freq = nk.hrv_frequency(peaks_dict, sampling_rate=sampling_rate)
+                            hrv_metrics = pd.concat([hrv_metrics, hrv_freq], axis=1)
+                        except Exception as e:
+                            print(f"HRV frequency calculation error: {e}")
+
+                        # Optionally, try to compute nonlinear HRV metrics
+                        try:
+                            hrv_nonlinear = nk.hrv_nonlinear(peaks_dict, sampling_rate=sampling_rate)
+                            hrv_metrics = pd.concat([hrv_metrics, hrv_nonlinear], axis=1)
+                        except Exception as e:
+                            print(f"HRV nonlinear calculation error: {e}")
+
+                        # Add additional PPG features if needed
+                        # Example: Pulse Amplitude Variability (PAV)
+                        pulse_amplitudes = ppg_p[peaks]
+                        pav = np.std(pulse_amplitudes) / np.mean(pulse_amplitudes)
+                        hrv_metrics["PAV"] = pav
+
+                        # Get the starting timestamp of the window
+                        window_start_time_ms = window_timestamps[0]
+
+                        # Compute time elapsed in seconds from the start of the signal
+                        time_elapsed_seconds = (window_start_time_ms - start_time_ms) / 1000.0
+
+                        # Add the time_elapsed_seconds to hrv_metrics
+                        hrv_metrics["Time_Elapsed_Seconds"] = time_elapsed_seconds
+
+                        # Check if hrv_metrics is not empty
+                        if not hrv_metrics.empty:
+                            # Append to hrv_list
+                            hrv_list.append(hrv_metrics)
+                        else:
+                            print("No HRV metrics were computed for this window.")
+                    else:
+                        # Not enough peaks, skip this window
+                        continue
+                else:
+                    # Invalid window, skip
+                    continue
 
     # Concatenate HRV metrics into a DataFrame
     if hrv_list:
@@ -132,7 +167,14 @@ def save_ppg_features(patient, time_window=120, sqi_threshold=0.5):
         cols.remove("Time_Elapsed_Seconds")
         hrv_df = hrv_df[["Time_Elapsed_Seconds"] + cols]
         # Save the HRV variables
-        hrv_df.to_csv(path+f"hrv_{time_window}_{sqi_threshold}.csv", index=False)
+        output_path = '../data/HRV/'
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
+        hrv_df.to_csv(os.path.join(output_path, f"{patient}_hrv_{time_window}s.csv"), index=False)
         print(f"PPG signal processing and HRV calculation complete for {patient}.")
     else:
         print(f"No valid HRV data was found in the PPG signal for {patient}.")
+
+
+# Example usage
+save_ppg_features("003-1001", time_window=20)
