@@ -62,6 +62,7 @@ def compute_hrv_metrics(peaks_dict, sampling_rate):
 
 
 def save_ppg_features(patient, time_window=20):
+    if os.path.exists(f'../data/01NVa_Sepsis/RAW_DATA/{patient}_hrv_{time_window}s.csv'): return
     base_path = '../data/01NVa_Sepsis/RAW_DATA/'
     path = find_patient_ppg_path(base_path, patient)
     if path is None:
@@ -128,4 +129,8 @@ def save_ppg_features(patient, time_window=20):
 
 
 # Example usage
-save_ppg_features("003-1001", time_window=20)
+for i in range(1001, 1260):
+    try:
+        save_ppg_features(f"003-{i}", time_window=20)
+    except Exception as e:
+        print(f"Error processing patient {i}: {e}")
