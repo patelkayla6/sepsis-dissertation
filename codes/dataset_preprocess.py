@@ -1,82 +1,138 @@
 import os
 import pandas as pd
-import numpy as np 
+import numpy as np
 from sklearn.model_selection import StratifiedKFold, LeaveOneOut
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
-from ppg_preprocess import save_ppg_features
 
 # Path to the Excel file
 file_path = '../data/sepsis_01NVa_Sep2024_CHENYANG.xlsx'
 
+def load_ppg_hrv(usubjid, time_window=20):
+    hrv_file = f'../data/HRV/{usubjid}_hrv_{time_window}s.csv'
+    if not os.path.exists(hrv_file):
+        return None
+    ppg_features = [
+        'HRV_MeanNN', 'HRV_SDNN', 'HRV_RMSSD', 'HRV_SDSD', 'HRV_CVNN', 'HRV_CVSD', 'HRV_MedianNN',
+        'HRV_MadNN', 'HRV_MCVNN', 'HRV_IQRNN', 'HRV_SDRMSSD', 'HRV_Prc20NN', 'HRV_Prc80NN',
+        'HRV_pNN50', 'HRV_pNN20', 'HRV_MinNN', 'HRV_MaxNN', 'HRV_HTI', 'HRV_TINN', 'HRV_HF',
+        'HRV_VHF', 'HRV_TP', 'HRV_HFn', 'HRV_LnHF', 'HRV_SD1', 'HRV_SD2', 'HRV_SD1SD2', 'HRV_S',
+        'HRV_CSI', 'HRV_CVI', 'HRV_CSI_Modified', 'HRV_PIP', 'HRV_IALS', 'HRV_PSS', 'HRV_PAS',
+        'HRV_GI', 'HRV_SI', 'HRV_AI', 'HRV_PI', 'HRV_C1d', 'HRV_C1a', 'HRV_SD1d', 'HRV_SD1a',
+        'HRV_C2d', 'HRV_C2a', 'HRV_SD2d', 'HRV_SD2a', 'HRV_Cd', 'HRV_Ca', 'HRV_SDNNd',
+        'HRV_SDNNa', 'HRV_DFA_alpha1', 'HRV_MFDFA_alpha1_Width', 'HRV_MFDFA_alpha1_Peak',
+        'HRV_MFDFA_alpha1_Mean', 'HRV_MFDFA_alpha1_Max', 'HRV_MFDFA_alpha1_Delta',
+        'HRV_MFDFA_alpha1_Asymmetry', 'HRV_MFDFA_alpha1_Fluctuation',
+        'HRV_MFDFA_alpha1_Increment', 'HRV_ApEn', 'HRV_SampEn', 'HRV_ShanEn', 'HRV_FuzzyEn',
+        'HRV_CD', 'HRV_HFD', 'HRV_KFD', 'HRV_LZC', 'PAV'
+    ]
+    data = pd.read_csv(hrv_file)
+    feature_dict = {}
+    for feature in ppg_features:
+        X = data['Time_Elapsed_Seconds'].values.reshape(-1, 1)
+        y = data[feature].values
+        # remove NaN values
+        valid_idx = ~np.isnan(y)
+        X, y = X[valid_idx], y[valid_idx]
+        # remove infinite values
+        valid_idx = np.isfinite(y)
+        X, y = X[valid_idx], y[valid_idx]
+        feature_dict[f'{feature}_mean'] = y.mean()
+        feature_dict[f'{feature}_var'] = y.var()
+        if len(y) > 1:
+            model = LinearRegression().fit(X, y)
+            y_pred = model.predict(X)
+            feature_dict[f'{feature}_slope'] = model.coef_[0]
+            feature_dict[f'{feature}_intercept'] = model.intercept_
+            feature_dict[f'{feature}_rmse'] = np.sqrt(mean_squared_error(y, y_pred))
+            feature_dict[f'{feature}_r2'] = r2_score(y, y_pred)
+        else:
+            feature_dict[f'{feature}_slope'] = np.nan
+            feature_dict[f'{feature}_intercept'] = np.nan
+            feature_dict[f'{feature}_rmse'] = np.nan
+            feature_dict[f'{feature}_r2'] = np.nan
+    return feature_dict
+
 def load_excel():
     # Load the Excel file
     excel_data = pd.ExcelFile(file_path)
+    
+    # Function to process each sheet
+    def process_sheet(sheet_name, drop_cols=None, binary_cols=None, custom_processing=None, aggregate_func=None):
+        df = pd.read_excel(excel_data, sheet_name)
+        if drop_cols:
+            df = df.drop(columns=drop_cols)
+        if binary_cols:
+            df[binary_cols] = df[binary_cols].applymap(lambda x: 'Y' if x == 1 else 'N')
+        if custom_processing:
+            df = custom_processing(df)
+        if aggregate_func:
+            df = df.groupby('USUBJID').aggregate(aggregate_func).reset_index()
+        return df
 
-    # Load and process 'sepsis_DM' sheet
-    sepsis_DM = pd.read_excel(excel_data, 'sepsis_DM')
-    feature_sepsis_DM = sepsis_DM.drop(columns=['STUDY', 'SUBJID', 'ADM_DATE', 'ADM_TIME'])
-
-    # Load and process 'HIST' sheet
-    HIST = pd.read_excel(excel_data, 'HIST')
+    # Process sheets
+    feature_sepsis_DM = process_sheet(
+        'sepsis_DM', drop_cols=['STUDY', 'SUBJID', 'ADM_DATE', 'ADM_TIME'],
+        aggregate_func='first'
+    )
     hist_drop_cols = [
         'STUDY', 'SITEID', 'SUBJID', 'MONITORING_START_DATE', 'MONITORING_START_TIME',
         'MONITOTING_END_DATE', 'MONITORING_END_TIME', 'PPGTYPE', 'PPGPOSI'
     ]
-    feature_HIST = HIST.drop(columns=hist_drop_cols)
-
-    # Load and process 'ES' sheet
-    ES = pd.read_excel(excel_data, 'ES')
-    feature_ES = ES.drop(columns=['STUDY', 'SITEID', 'SUBJID'])
-    binary_columns = ['PNEUMONIA', 'SEPTIC SHOCK', 'UNKOWN_SOURCE']
-    feature_ES[binary_columns] = feature_ES[binary_columns].applymap(lambda x: 'Y' if x == 1 else 'N')
-
-    # Load and process 'CLI' sheet for features
-    CLI = pd.read_excel(excel_data, 'CLI')
-    feature_CLI = CLI[['USUBJID', 'OXY_START_DAY']]
-    feature_CLI['OXY_START_DAY'] = feature_CLI['OXY_START_DAY'].apply(
-        lambda x: 'Y' if x == 0 else ('N' if pd.notna(x) else np.nan)
+    feature_HIST = process_sheet(
+        'HIST', drop_cols=hist_drop_cols,
+        aggregate_func='first'
+    )
+    feature_ES = process_sheet(
+        'ES', drop_cols=['STUDY', 'SITEID', 'SUBJID'],
+        binary_cols=['PNEUMONIA', 'SEPTIC SHOCK', 'UNKOWN_SOURCE'],
+        aggregate_func='first'
     )
 
-    # Load and process 'DAILY_VITAL' sheet
-    DAILY_VITAL = pd.read_excel(excel_data, 'DAILY_VITAL')
-    df_DAILY_VITAL = DAILY_VITAL.drop(columns=['EVENT', 'DATE', 'TIME'])
-    # Add 'MONITORING_MAP' column, which is calculated by (SYSBP + 2 * DIABP) / 3
-    df_DAILY_VITAL['MONITORING_MAP'] = (df_DAILY_VITAL['MONITORING_SYSBP'] + 2 * df_DAILY_VITAL['MONITORING_DIABP']) / 3
+    # Custom processing for 'CLI' sheet
+    def process_CLI(df):
+        df['OXY_START_DAY'] = df['OXY_START_DAY'].apply(
+            lambda x: 'Y' if x == 0 else ('N' if pd.notna(x) else np.nan)
+        )
+        return df[['USUBJID', 'OXY_START_DAY']]
+    feature_CLI = process_sheet('CLI', custom_processing=process_CLI, aggregate_func='first')
+
+    # Process 'DAILY_VITAL' sheet
+    DAILY_VITAL = pd.read_excel(excel_data, 'DAILY_VITAL').drop(columns=['EVENT', 'DATE', 'TIME'])
+    DAILY_VITAL['MONITORING_MAP'] = (
+        DAILY_VITAL['MONITORING_SYSBP'] + 2 * DAILY_VITAL['MONITORING_DIABP']
+    ) / 3
     variables = [
         'MONITORING_TEMP', 'MONITORING_PULSE', 'MONITORING_SYSBP',
         'MONITORING_DIABP', 'MONITORING_RESP', 'MONITORING_SPO2', 'MONITORING_MAP'
     ]
-    
 
     # Calculate statistics for 'DAILY_VITAL'
     feature_DAILY_VITAL = []
-    for usubjid, group in df_DAILY_VITAL.groupby('USUBJID'):
+    for usubjid, group in DAILY_VITAL.groupby('USUBJID'):
         result = {'USUBJID': usubjid}
         for var in variables:
             valid_data = group[['VITAL_VITAL_SEQ', var]].dropna()
+            if valid_data.empty:
+                for stat in ['mean', 'var', 'slope', 'intercept', 'rmse', 'r2']:
+                    result[f'{var}_{stat}'] = np.nan
+                continue
             X = valid_data['VITAL_VITAL_SEQ'].values.reshape(-1, 1)
             y = valid_data[var].values
+            result[f'{var}_mean'] = y.mean()
+            result[f'{var}_var'] = y.var()
             if len(y) > 1:
-                result[f'{var}_mean'] = y.mean()
-                result[f'{var}_var'] = y.var()
-                # Fit linear regression
-                model = LinearRegression()
-                model.fit(X, y)
+                model = LinearRegression().fit(X, y)
                 y_pred = model.predict(X)
                 result[f'{var}_slope'] = model.coef_[0]
                 result[f'{var}_intercept'] = model.intercept_
                 result[f'{var}_rmse'] = np.sqrt(mean_squared_error(y, y_pred))
                 result[f'{var}_r2'] = r2_score(y, y_pred)
             else:
-                result[f'{var}_mean'] = y.mean() if len(y) > 0 else np.nan
-                result[f'{var}_var'] = y.var() if len(y) > 0 else np.nan
-                result[f'{var}_slope'] = np.nan
-                result[f'{var}_intercept'] = np.nan
-                result[f'{var}_rmse'] = np.nan
-                result[f'{var}_r2'] = np.nan
+                for stat in ['slope', 'intercept', 'rmse', 'r2']:
+                    result[f'{var}_{stat}'] = np.nan
         feature_DAILY_VITAL.append(result)
     feature_DAILY_VITAL = pd.DataFrame(feature_DAILY_VITAL)
 
@@ -86,46 +142,66 @@ def load_excel():
     features = features.merge(feature_CLI, on='USUBJID', how='outer')
     features = features.merge(feature_DAILY_VITAL, on='USUBJID', how='outer')
 
-    # Process ppg data for each patient
-    raw_path = f'../data/01NVa_Sepsis/RAW_DATA/'
-    patient_names = [f for f in os.listdir(raw_path)]
+    # Process PPG HRV data for each patient
+    ppg_hrv_features = []
     for usubjid in features['USUBJID']:
-        for patient in patient_names:
-            if usubjid in patient:
-                save_ppg_features(patient)
+        hrv_features = load_ppg_hrv(usubjid)
+        if hrv_features is not None:
+            hrv_features['USUBJID'] = usubjid
+            ppg_hrv_features.append(hrv_features)
+    ppg_hrv_features_df = pd.DataFrame(ppg_hrv_features)
+    features = features.merge(ppg_hrv_features_df, on='USUBJID', how='left')
 
     # Load and process labels
-    label_CLI = CLI[['USUBJID', 'DIED', 'HFNOV', 'MEVEN']]
+    label_CLI = pd.read_excel(excel_data, 'CLI')
     label_columns = ['DIED', 'HFNOV', 'MEVEN']
+    label_CLI = label_CLI[['USUBJID'] + label_columns]
     for col in label_columns:
-        label_CLI[col] = label_CLI[col].apply(lambda x: 1 if x is True else (0 if x is False else np.nan))
+        label_CLI[col] = label_CLI[col].map({True: 1, False: 0})
+    label_CLI = label_CLI.groupby('USUBJID').aggregate('first').reset_index()
 
-    DIS = pd.read_excel(excel_data, 'DIS')
-    # The values for 'CULTURE_RESULT' are 'POS', 'NEG', or 'ND'
-    label_DIS = DIS[['USUBJID', 'OUTCOME', 'CULTURE_RESULT']]
+    label_DIS = pd.read_excel(excel_data, 'DIS')[['USUBJID', 'OUTCOME', 'CULTURE_RESULT']]
+    label_DIS = label_DIS.groupby('USUBJID').aggregate('first').reset_index()
     labels = label_CLI.merge(label_DIS, on='USUBJID', how='outer')
 
-    return features.set_index('USUBJID'), labels.set_index('USUBJID')
+    # Set index after ensuring uniqueness
+    features = features.set_index('USUBJID')
+    labels = labels.set_index('USUBJID')
+
+    # Align features and labels
+    common_usubjid = features.index.intersection(labels.index)
+    features = features.loc[common_usubjid]
+    labels = labels.loc[common_usubjid]
+
+    assert len(features) == len(labels), "Features and labels DataFrames have different lengths."
+
+    return features, labels
 
 
 class DataPreprocessor:
-    def __init__(self, label_name='DIED', missing_method='median', normalize=True):
+    def __init__(self, label_name='DIED', missing_method='median', normalize=True, feature_list=None):
         assert label_name in ['DIED', 'HFNOV', 'MEVEN', 'OUTCOME', 'CULTURE_RESULT']
         assert missing_method in [None, 'median']
 
         features, labels = load_excel()
 
-        feature_list = features.columns.tolist()
+        if feature_list is not None:
+            # only keep the features in the feature_list
+            features = features[feature_list]
+
         # Select IDs with non-missing labels and available features
         IDs_with_labels = labels[labels[label_name].notna()].index
         ID_list = IDs_with_labels.intersection(features.index)
 
-        self.features = features.loc[ID_list, feature_list]
+        self.features = features.loc[ID_list]
         self.labels = labels.loc[ID_list, label_name]
 
         # One-hot encode categorical variables
         categorical_cols = self.features.select_dtypes(include=['object']).columns
-        self.features = pd.get_dummies(self.features, columns=categorical_cols, dummy_na=False)
+        if len(categorical_cols) > 0:
+            self.features = pd.get_dummies(
+                self.features, columns=categorical_cols, dummy_na=False, drop_first=True
+            )
 
         # Initialize data splitting variables
         self.X_train, self.X_test, self.y_train, self.y_test = None, None, None, None
@@ -140,7 +216,9 @@ class DataPreprocessor:
         assert method in ['kfold', 'leaveoneout', 'full']
         if method == 'kfold':
             assert n_splits >= 2
-            cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=split_index//n_splits)
+            cv = StratifiedKFold(
+                n_splits=n_splits, shuffle=True, random_state=split_index // n_splits
+            )
             splits = list(cv.split(self.features, self.labels))
             train_index, test_index = splits[split_index % n_splits]
             self.X_train, self.X_test = self.features.iloc[train_index], self.features.iloc[test_index]
@@ -172,32 +250,28 @@ class DataPreprocessor:
             # Fill numerical columns with the median of the training set
             numerical_cols = self.X_train.select_dtypes(include=[np.number]).columns
             if len(numerical_cols) > 0:
-                self.num_imputer = SimpleImputer(strategy='median')
-                self.X_train[numerical_cols] = self.num_imputer.fit_transform(self.X_train[numerical_cols])
+                num_imputer = SimpleImputer(strategy='median')
+                self.X_train[numerical_cols] = num_imputer.fit_transform(self.X_train[numerical_cols])
                 if not self.X_test.empty:
-                    self.X_test[numerical_cols] = self.num_imputer.transform(self.X_test[numerical_cols])
+                    self.X_test[numerical_cols] = num_imputer.transform(self.X_test[numerical_cols])
 
             # Fill categorical columns with the mode of the training set
-            categorical_cols = self.X_train.select_dtypes(include=['object', 'category']).columns
+            categorical_cols = self.X_train.select_dtypes(include=['object']).columns
             if len(categorical_cols) > 0:
-                self.cat_imputer = SimpleImputer(strategy='most_frequent')
-                self.X_train[categorical_cols] = self.cat_imputer.fit_transform(self.X_train[categorical_cols])
+                cat_imputer = SimpleImputer(strategy='most_frequent')
+                self.X_train[categorical_cols] = cat_imputer.fit_transform(self.X_train[categorical_cols])
                 if not self.X_test.empty:
-                    self.X_test[categorical_cols] = self.cat_imputer.transform(self.X_test[categorical_cols])
+                    self.X_test[categorical_cols] = cat_imputer.transform(self.X_test[categorical_cols])
         else:
             raise ValueError('Invalid method to deal with missing values')
-
 
     def normalize_features(self):
         numerical_cols = self.X_train.select_dtypes(include=[np.number]).columns
         if len(numerical_cols) > 0:
-            self.scaler = StandardScaler()
-            self.scaler.fit(self.X_train[numerical_cols])
-
-            self.X_train[numerical_cols] = self.scaler.transform(self.X_train[numerical_cols])
+            scaler = StandardScaler()
+            self.X_train[numerical_cols] = scaler.fit_transform(self.X_train[numerical_cols])
             if not self.X_test.empty:
-                self.X_test[numerical_cols] = self.scaler.transform(self.X_test[numerical_cols])
-
+                self.X_test[numerical_cols] = scaler.transform(self.X_test[numerical_cols])
 
     def get_dataset(self):
         return self.X_train, self.X_test, self.y_train, self.y_test

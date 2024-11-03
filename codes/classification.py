@@ -38,14 +38,14 @@ def compute_metrics(y_true, y_pred, y_prob):
         'AUPRC': auprc
     }
 
-def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', split_method='kfold', kfold=5, num_splits=50, use_pca=False, n_components=None):
+def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', split_method='kfold', kfold=5, num_splits=50, use_pca=False, n_components=None, feature_list=None):
     print(f"\nClassifier: {clf_name} with Calibrator: {calibrator} {'with PCA' if use_pca else ''}")
     metrics_list = []
     auroc_list = []
     model_list = []
     feature_names = None  # Initialize feature names
     # Initialize the data preprocessor
-    preprocessor = DataPreprocessor(label_name=label_name, missing_method='median', normalize=True)
+    preprocessor = DataPreprocessor(label_name=label_name, missing_method='median', normalize=True, feature_list=feature_list)
     
     assert split_method in ['kfold', 'leaveoneout']
     if split_method == 'leaveoneout':
@@ -126,15 +126,6 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
             y_true_list.append(y_test)
             y_prob_list.append(y_prob_cal)
             y_pred_list.append(y_pred)
-            
-            # Optionally, store model information
-            # model_info = {
-            #     'split_index': split_index,
-            #     'model': copy.deepcopy(clf),
-            #     'calibrator': copy.deepcopy(calib_model) if calibrator != 'none' else None,
-            #     'pca': copy.deepcopy(pca) if use_pca else None
-            # }
-            # model_list.append(model_info)
         
         # After all splits
         # Concatenate y_true_list, y_prob_list, y_pred_list
@@ -236,16 +227,6 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
                 y_true_cv.append(y_test)
                 y_prob_cv.append(y_prob_cal)
                 y_pred_cv.append(y_pred)
-                
-                # Optionally, store model information
-                # model_info = {
-                #     'cv_num': cv_num,
-                #     'fold_num': fold_num,
-                #     'model': copy.deepcopy(clf),
-                #     'calibrator': copy.deepcopy(calib_model) if calibrator != 'none' else None,
-                #     'pca': copy.deepcopy(pca) if use_pca else None
-                # }
-                # model_list.append(model_info)
             
             # After all folds in this CV
             # Concatenate y_true_cv, y_prob_cv, y_pred_cv
@@ -263,9 +244,15 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
         # Compute average metrics and standard deviation across CVs
         avg_metrics = pd.DataFrame(metrics_list).mean()
         std_metrics = pd.DataFrame(metrics_list).std()
+
+        # Convert to percentages and round to one decimal place
+        avg_metrics_percent = (avg_metrics * 100).round(1)
+        std_metrics_percent = (std_metrics * 100).round(1)
+
         # Combine mean and std into a single Series with formatted strings
-        combined_metrics = avg_metrics.round(4).astype(str) + ' ± ' + std_metrics.round(4).astype(str)
-        print("Average Metrics over {} {}-fold cross-validations (mean ± std):".format(num_CVs, kfold))
+        combined_metrics = avg_metrics_percent.astype(str) + '%±' + std_metrics_percent.astype(str) + '%'
+
+        print("Average Metrics over {} {}-fold cross-validations (mean±std):".format(num_CVs, kfold))
         print(combined_metrics)
         
         return metrics_list, auroc_list, model_list, feature_names
@@ -404,10 +391,11 @@ def main():
     }
     
     # Calibrator options
-    calibrators = ['none', 'platt', 'isotonic']
+    # calibrators = ['none', 'platt', 'isotonic']
+    calibrators = ['none']
     
     # PCA options
-    use_pca = True  # Set to True to enable PCA
+    use_pca = False  # Set to True to enable PCA
     n_components = 50  # Number of principal components to keep
     
     # Dictionaries to store results
@@ -421,13 +409,31 @@ def main():
     kfold = 10
     # Number of splits (will be set inside the function for leave-one-out)
     num_splits = 200  # Set to None since it will be determined by the number of samples
+
+    # Set feature list to None to use all features
+    ppg_features = [
+        'HRV_MeanNN', 'HRV_SDNN', 'HRV_RMSSD', 'HRV_SDSD', 'HRV_CVNN', 'HRV_CVSD', 'HRV_MedianNN',
+        'HRV_MadNN', 'HRV_MCVNN', 'HRV_IQRNN', 'HRV_SDRMSSD', 'HRV_Prc20NN', 'HRV_Prc80NN',
+        'HRV_pNN50', 'HRV_pNN20', 'HRV_MinNN', 'HRV_MaxNN', 'HRV_HTI', 'HRV_TINN', 'HRV_HF',
+        'HRV_VHF', 'HRV_TP', 'HRV_HFn', 'HRV_LnHF', 'HRV_SD1', 'HRV_SD2', 'HRV_SD1SD2', 'HRV_S',
+        'HRV_CSI', 'HRV_CVI', 'HRV_CSI_Modified', 'HRV_PIP', 'HRV_IALS', 'HRV_PSS', 'HRV_PAS',
+        'HRV_GI', 'HRV_SI', 'HRV_AI', 'HRV_PI', 'HRV_C1d', 'HRV_C1a', 'HRV_SD1d', 'HRV_SD1a',
+        'HRV_C2d', 'HRV_C2a', 'HRV_SD2d', 'HRV_SD2a', 'HRV_Cd', 'HRV_Ca', 'HRV_SDNNd',
+        'HRV_SDNNa', 'HRV_DFA_alpha1', 'HRV_MFDFA_alpha1_Width', 'HRV_MFDFA_alpha1_Peak',
+        'HRV_MFDFA_alpha1_Mean', 'HRV_MFDFA_alpha1_Max', 'HRV_MFDFA_alpha1_Delta',
+        'HRV_MFDFA_alpha1_Asymmetry', 'HRV_MFDFA_alpha1_Fluctuation',
+        'HRV_MFDFA_alpha1_Increment', 'HRV_ApEn', 'HRV_SampEn', 'HRV_ShanEn', 'HRV_FuzzyEn',
+        'HRV_CD', 'HRV_HFD', 'HRV_KFD', 'HRV_LZC', 'PAV'
+    ]
+    feature_type = ['mean', 'var', 'slope', 'intercept', 'rmse', 'r2']
+    feature_list = [feature+'_'+ftype for feature in ppg_features for ftype in feature_type]
     
     # Loop over classifiers and calibrators
     for calibrator in calibrators:
         for clf_name, clf in classifiers.items():
             combined_name = f"{clf_name}_{calibrator}{'_PCA' if use_pca else ''}"
             metrics_list, auroc_list, model_list, feature_names = train_and_evaluate_classifier(
-                clf_name, copy.deepcopy(clf), label_name, calibrator, split_method, kfold, num_splits, use_pca, n_components)
+                clf_name, copy.deepcopy(clf), label_name, calibrator, split_method, kfold, num_splits, use_pca, n_components, feature_list)
             # Store AUROC scores and model information
             auroc_scores[combined_name] = auroc_list
             models_info[combined_name] = model_list
@@ -438,7 +444,7 @@ def main():
     
     # Compute feature importances using the classifier trained on the whole dataset
     # Initialize the data preprocessor
-    preprocessor = DataPreprocessor(label_name=label_name, missing_method='median', normalize=True)
+    preprocessor = DataPreprocessor(label_name=label_name, missing_method='median', normalize=True, feature_list=feature_list)
     preprocessor.split_data(method='full')
     X_full, _, y_full, _ = preprocessor.get_dataset()
     y_full = y_full.astype(int)

@@ -170,9 +170,9 @@ def save_ppg_features(patient, time_window=20):
         print(f"No valid HRV data was found in the PPG signal for {patient}.")
 
 
-# Example usage
-for i in range(1001, 1260):
-    try:
-        save_ppg_features(f"003-{i}", time_window=20)
-    except Exception as e:
-        print(f"Error processing patient {i}: {e}")
+# # Example usage
+# for i in range(1001, 1260):
+#     try:
+#         save_ppg_features(f"003-{i}", time_window=20)
+#     except Exception as e:
+#         print(f"Error processing patient {i}: {e}")
