@@ -4,6 +4,7 @@ import neurokit2 as nk
 import os
 from datetime import datetime
 from sqi import ppg_quality
+import re
 
 
 def find_patient_ppg_path(base_path, patient):
@@ -14,18 +15,58 @@ def find_patient_ppg_path(base_path, patient):
     return None
 
 
-def process_ppg_file(file_path):
-    filename = os.path.basename(file_path)
-    start_time_str = filename.split('.')[0]
-    start_time = datetime.strptime(start_time_str, "%Y%m%dT%H%M%S")
+def sort_ppg_files(file_list):
+    # Extract a key from each filename to sort
+    def get_sort_key(file_path):
+        base_name = os.path.basename(file_path)
+        # Try to extract date
+        try:
+            start_time_str = base_name.split('.')[0]
+            datetime.strptime(start_time_str, "%Y%m%dT%H%M%S")
+            # Files with date in filename, sort by date
+            return start_time_str
+        except ValueError:
+            # Files without date, extract the number at the end
+            match = re.search(r'(\d+)\.csv$', base_name)
+            if match:
+                number = int(match.group(1))
+                return "{:010d}".format(int(number))
+            else:
+                # No number, return the base name
+                return base_name
+    return sorted(file_list, key=get_sort_key)
 
-    temp_df = pd.read_csv(file_path)
-    temp_df["TIMESTAMP_MS"] += int(start_time.timestamp() * 1000)
-    temp_df = temp_df[["TIMESTAMP_MS", "PLETH"]].rename(columns={"PLETH": "ppg"})
-    return temp_df
+
+def process_ppg_files(ppg_files):
+    df_list = []
+    cumulative_time_ms = 0  # Initialize cumulative time
+    for file in ppg_files:
+        temp_df = pd.read_csv(file)
+        temp_df = temp_df[["TIMESTAMP_MS", "PLETH"]].rename(columns={"PLETH": "ppg"})
+        filename = os.path.basename(file)
+        try:
+            # Try to parse the start time from the filename
+            start_time_str = filename.split('.')[0]
+            start_time = datetime.strptime(start_time_str, "%Y%m%dT%H%M%S")
+            start_time_ms = int(start_time.timestamp() * 1000)
+        except ValueError:
+            # If parsing fails, use cumulative_time_ms
+            start_time_ms = cumulative_time_ms
+
+        # Ensure that start_time_ms is at least cumulative_time_ms to avoid overlaps
+        start_time_ms = max(start_time_ms, cumulative_time_ms)
+        # Adjust TIMESTAMP_MS to start from start_time_ms
+        temp_df["TIMESTAMP_MS"] = start_time_ms + (temp_df["TIMESTAMP_MS"] - temp_df["TIMESTAMP_MS"].iloc[0])
+        # Update cumulative_time_ms for the next file
+        cumulative_time_ms = temp_df["TIMESTAMP_MS"].iloc[-1] + 10  # Add 10 ms to prevent overlap
+        df_list.append(temp_df)
+    concatenated_df = pd.concat(df_list, ignore_index=True)
+    return concatenated_df
 
 
 def resample_ppg_data(df, sampling_interval=10):
+    # Drop duplicates to avoid reindexing errors
+    df = df.drop_duplicates(subset='TIMESTAMP_MS')
     df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP_MS'], unit='ms')
     df = df.set_index('TIMESTAMP').resample(f'{sampling_interval}ms').asfreq().reset_index()
     df['TIMESTAMP_MS'] = (df['TIMESTAMP'].astype(np.int64) // 10**6)
@@ -62,15 +103,16 @@ def compute_hrv_metrics(peaks_dict, sampling_rate):
 
 
 def save_ppg_features(patient, time_window=20):
-    if os.path.exists(f'../data/01NVa_Sepsis/RAW_DATA/{patient}_hrv_{time_window}s.csv'): return
+    if os.path.exists(f'../data/HRV/{patient}_hrv_{time_window}s.csv'):
+        return
     base_path = '../data/01NVa_Sepsis/RAW_DATA/'
     path = find_patient_ppg_path(base_path, patient)
     if path is None:
         return
 
     ppg_files = [os.path.join(path, f) for f in os.listdir(path) if f.endswith('.csv')]
-    df_list = [process_ppg_file(file) for file in ppg_files]
-    concatenated_df = pd.concat(df_list, ignore_index=True)
+    ppg_files = sort_ppg_files(ppg_files)
+    concatenated_df = process_ppg_files(ppg_files)
     concatenated_df = resample_ppg_data(concatenated_df)
     concatenated_df = remove_long_invalid_ppg(concatenated_df, threshold_samples=1000)
 
@@ -82,7 +124,7 @@ def save_ppg_features(patient, time_window=20):
     start_time_ms = df_ppg["TIMESTAMP_MS"].min()
 
     hrv_list = []
-    sampling_rate = 100
+    sampling_rate = 1000 // 10  # Since sampling interval is 10ms
     window_size = int(time_window * sampling_rate)
 
     for segment_id, segment_df in df_ppg.groupby("Segment_ID"):
