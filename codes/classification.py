@@ -38,14 +38,14 @@ def compute_metrics(y_true, y_pred, y_prob):
         'AUPRC': auprc
     }
 
-def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', split_method='kfold', kfold=5, num_splits=50, use_pca=False, n_components=None, feature_list=None):
+def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', split_method='kfold', kfold=5, num_splits=50, use_pca=False, n_components=None, feature_list=None, signal_type='ECG', lead=0):
     print(f"\nClassifier: {clf_name} with Calibrator: {calibrator} {'with PCA' if use_pca else ''}")
     metrics_list = []
     auroc_list = []
     model_list = []
     feature_names = None  # Initialize feature names
     # Initialize the data preprocessor
-    preprocessor = DataPreprocessor(label_name=label_name, missing_method='median', normalize=True, feature_list=feature_list)
+    preprocessor = DataPreprocessor(label_name=label_name, missing_method='median', normalize=True, feature_list=feature_list, signal_type=signal_type, lead=lead)
     
     assert split_method in ['kfold', 'leaveoneout']
     if split_method == 'leaveoneout':
@@ -409,9 +409,13 @@ def main():
     kfold = 10
     # Number of splits (will be set inside the function for leave-one-out)
     num_splits = 200  # Set to None since it will be determined by the number of samples
+    # Signal type
+    signal_type = 'ECG'
+    # Lead
+    lead = 1
 
     # Set feature list to None to use all features
-    ppg_features = [
+    hrv_features = [
         'HRV_MeanNN', 'HRV_SDNN', 'HRV_RMSSD', 'HRV_SDSD', 'HRV_CVNN', 'HRV_CVSD', 'HRV_MedianNN',
         'HRV_MadNN', 'HRV_MCVNN', 'HRV_IQRNN', 'HRV_SDRMSSD', 'HRV_Prc20NN', 'HRV_Prc80NN',
         'HRV_pNN50', 'HRV_pNN20', 'HRV_MinNN', 'HRV_MaxNN', 'HRV_HTI', 'HRV_TINN', 'HRV_HF',
@@ -423,17 +427,23 @@ def main():
         'HRV_MFDFA_alpha1_Mean', 'HRV_MFDFA_alpha1_Max', 'HRV_MFDFA_alpha1_Delta',
         'HRV_MFDFA_alpha1_Asymmetry', 'HRV_MFDFA_alpha1_Fluctuation',
         'HRV_MFDFA_alpha1_Increment', 'HRV_ApEn', 'HRV_SampEn', 'HRV_ShanEn', 'HRV_FuzzyEn',
-        'HRV_CD', 'HRV_HFD', 'HRV_KFD', 'HRV_LZC', 'PAV'
+        'HRV_CD', 'HRV_HFD', 'HRV_KFD', 'HRV_LZC'
     ]
-    feature_type = ['mean', 'var', 'slope', 'intercept', 'rmse', 'r2']
-    feature_list = [feature+'_'+ftype for feature in ppg_features for ftype in feature_type]
+    ecg_features = ['ECG_a_R', 'ECG_RR0', 'ECG_RR1', 'ECG_RR2', 'ECG_RRm', 'ECG_RR_0_1', 'ECG_RR_2_1', 'ECG_RR_m_1', 'ECG_t_PR', 
+                    'ECG_t_QR', 'ECG_t_RS',	'ECG_t_RT', 'ECG_t_PQ', 'ECG_t_PS', 'ECG_t_PT', 'ECG_t_QS', 'ECG_t_QT', 'ECG_t_ST', 
+                    'ECG_a_PQ', 'ECG_a_QR', 'ECG_a_RS', 'ECG_a_ST', 'ECG_a_PS', 'ECG_a_PT', 'ECG_a_QS', 'ECG_a_QT', 'ECG_a_ST_QS', 
+                    'ECG_a_RS_QR'] + hrv_features
+
+    # feature_type = ['mean', 'var', 'slope', 'intercept', 'rmse', 'r2']
+    feature_type = ['mean', 'var']
+    feature_list = [feature+'_'+ftype for feature in ecg_features for ftype in feature_type]
     
     # Loop over classifiers and calibrators
     for calibrator in calibrators:
         for clf_name, clf in classifiers.items():
             combined_name = f"{clf_name}_{calibrator}{'_PCA' if use_pca else ''}"
             metrics_list, auroc_list, model_list, feature_names = train_and_evaluate_classifier(
-                clf_name, copy.deepcopy(clf), label_name, calibrator, split_method, kfold, num_splits, use_pca, n_components, feature_list)
+                clf_name, copy.deepcopy(clf), label_name, calibrator, split_method, kfold, num_splits, use_pca, n_components, feature_list, signal_type, lead)
             # Store AUROC scores and model information
             auroc_scores[combined_name] = auroc_list
             models_info[combined_name] = model_list
@@ -444,7 +454,7 @@ def main():
     
     # Compute feature importances using the classifier trained on the whole dataset
     # Initialize the data preprocessor
-    preprocessor = DataPreprocessor(label_name=label_name, missing_method='median', normalize=True, feature_list=feature_list)
+    preprocessor = DataPreprocessor(label_name=label_name, missing_method='median', normalize=True, feature_list=feature_list, signal_type=signal_type, lead=lead)
     preprocessor.split_data(method='full')
     X_full, _, y_full, _ = preprocessor.get_dataset()
     y_full = y_full.astype(int)

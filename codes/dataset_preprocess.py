@@ -10,11 +10,14 @@ from sklearn.preprocessing import StandardScaler
 # Path to the Excel file
 file_path = '../data/sepsis_01NVa_Sep2024_CHENYANG.xlsx'
 
-def load_ppg_hrv(usubjid, time_window=20):
-    hrv_file = f'../data/HRV/{usubjid}_hrv_{time_window}s.csv'
+def load_signal_features(usubjid, time_window=20, signal_type='PPG', lead=0):
+    if signal_type == 'PPG':
+        hrv_file = f'../data/HRV/{usubjid}_hrv_{time_window}s.csv'
+    elif signal_type == 'ECG':
+        hrv_file = f'../data/ECG/{usubjid}_ecg_lead{lead}_{time_window}s.csv'
     if not os.path.exists(hrv_file):
         return None
-    ppg_features = [
+    features_name = [
         'HRV_MeanNN', 'HRV_SDNN', 'HRV_RMSSD', 'HRV_SDSD', 'HRV_CVNN', 'HRV_CVSD', 'HRV_MedianNN',
         'HRV_MadNN', 'HRV_MCVNN', 'HRV_IQRNN', 'HRV_SDRMSSD', 'HRV_Prc20NN', 'HRV_Prc80NN',
         'HRV_pNN50', 'HRV_pNN20', 'HRV_MinNN', 'HRV_MaxNN', 'HRV_HTI', 'HRV_TINN', 'HRV_HF',
@@ -26,13 +29,21 @@ def load_ppg_hrv(usubjid, time_window=20):
         'HRV_MFDFA_alpha1_Mean', 'HRV_MFDFA_alpha1_Max', 'HRV_MFDFA_alpha1_Delta',
         'HRV_MFDFA_alpha1_Asymmetry', 'HRV_MFDFA_alpha1_Fluctuation',
         'HRV_MFDFA_alpha1_Increment', 'HRV_ApEn', 'HRV_SampEn', 'HRV_ShanEn', 'HRV_FuzzyEn',
-        'HRV_CD', 'HRV_HFD', 'HRV_KFD', 'HRV_LZC', 'PAV'
+        'HRV_CD', 'HRV_HFD', 'HRV_KFD', 'HRV_LZC'
     ]
+    if signal_type == 'ECG':
+        features_name = ['ECG_a_R', 'ECG_RR0', 'ECG_RR1', 'ECG_RR2', 'ECG_RRm', 'ECG_RR_0_1', 'ECG_RR_2_1', 'ECG_RR_m_1', 'ECG_t_PR', 
+                        'ECG_t_QR', 'ECG_t_RS',	'ECG_t_RT', 'ECG_t_PQ', 'ECG_t_PS', 'ECG_t_PT', 'ECG_t_QS', 'ECG_t_QT', 'ECG_t_ST', 
+                        'ECG_a_PQ', 'ECG_a_QR', 'ECG_a_RS', 'ECG_a_ST', 'ECG_a_PS', 'ECG_a_PT', 'ECG_a_QS', 'ECG_a_QT', 'ECG_a_ST_QS', 
+                        'ECG_a_RS_QR'] + features_name
     data = pd.read_csv(hrv_file)
     feature_dict = {}
-    for feature in ppg_features:
+    for feature in features_name:
         X = data['Time_Elapsed_Seconds'].values.reshape(-1, 1)
-        y = data[feature].values
+        if feature in data.columns:
+            y = data[feature].values
+        else:
+            y = np.full_like(X, np.nan)
         # remove NaN values
         valid_idx = ~np.isnan(y)
         X, y = X[valid_idx], y[valid_idx]
@@ -55,7 +66,7 @@ def load_ppg_hrv(usubjid, time_window=20):
             feature_dict[f'{feature}_r2'] = np.nan
     return feature_dict
 
-def load_excel():
+def load_excel(time_window=20, signal_type='ECG', lead=0):
     # Load the Excel file
     excel_data = pd.ExcelFile(file_path)
     
@@ -143,14 +154,14 @@ def load_excel():
     features = features.merge(feature_DAILY_VITAL, on='USUBJID', how='outer')
 
     # Process PPG HRV data for each patient
-    ppg_hrv_features = []
+    signal_features = []
     for usubjid in features['USUBJID']:
-        hrv_features = load_ppg_hrv(usubjid)
+        hrv_features = load_signal_features(usubjid, time_window=time_window, signal_type=signal_type, lead=lead)
         if hrv_features is not None:
             hrv_features['USUBJID'] = usubjid
-            ppg_hrv_features.append(hrv_features)
-    ppg_hrv_features_df = pd.DataFrame(ppg_hrv_features)
-    features = features.merge(ppg_hrv_features_df, on='USUBJID', how='left')
+            signal_features.append(hrv_features)
+    signal_features_df = pd.DataFrame(signal_features)
+    features = features.merge(signal_features_df, on='USUBJID', how='left')
 
     # Load and process labels
     label_CLI = pd.read_excel(excel_data, 'CLI')
@@ -179,11 +190,11 @@ def load_excel():
 
 
 class DataPreprocessor:
-    def __init__(self, label_name='DIED', missing_method='median', normalize=True, feature_list=None):
+    def __init__(self, label_name='DIED', missing_method='median', normalize=True, feature_list=None, signal_type='ECG', lead=0):
         assert label_name in ['DIED', 'HFNOV', 'MEVEN', 'OUTCOME', 'CULTURE_RESULT']
         assert missing_method in [None, 'median']
 
-        features, labels = load_excel()
+        features, labels = load_excel(time_window=20, signal_type=signal_type, lead=lead)
 
         if feature_list is not None:
             # only keep the features in the feature_list

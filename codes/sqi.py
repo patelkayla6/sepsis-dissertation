@@ -1,3 +1,5 @@
+# The code is provided by Dr. Xiao Gu and then modified.
+
 import pandas as pd
 import numpy as np
 import neurokit2 as nk
