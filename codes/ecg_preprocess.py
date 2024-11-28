@@ -95,17 +95,13 @@ def save_ecg_features(patient, time_window=20, lead=0):
         print(f"No ECG features extracted for patient {patient}.")
 
 
-# Example usage
-for i in range(1001, 1260):
-    for lead in range(2):
-        try:
-            save_ecg_features(f"003-{i}", time_window=20, lead=lead)
-        except Exception as e:
-            print(f"Error processing patient {i}: {e} for lead {lead}.")
-
-
-
-
+# # Example usage
+# for i in range(1001, 1260):
+#     for lead in range(2):
+#         try:
+#             save_ecg_features(f"003-{i}", time_window=20, lead=lead)
+#         except Exception as e:
+#             print(f"Error processing patient {i}: {e} for lead {lead}.")
 
                 
         
