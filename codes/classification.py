@@ -18,25 +18,10 @@ from scipy.stats import wilcoxon
 import copy
 from itertools import combinations
 import shap
+from utils import compute_metrics
 
 # Ignore warnings
 warnings.filterwarnings("ignore")
-
-# Function to compute evaluation metrics
-def compute_metrics(y_true, y_pred, y_prob):
-    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
-    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
-    sensitivity = recall_score(y_true, y_pred)
-    f1 = f1_score(y_true, y_pred)
-    auroc = roc_auc_score(y_true, y_prob)
-    auprc = average_precision_score(y_true, y_prob)
-    return {
-        'AUROC': auroc,
-        'Sensitivity': sensitivity,
-        'Specificity': specificity,
-        'F1-score': f1,
-        'AUPRC': auprc
-    }
 
 def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', split_method='kfold', kfold=5, num_splits=50, use_pca=False, n_components=None, feature_list=None, signal_type='ECG', lead=0):
     print(f"\nClassifier: {clf_name} with Calibrator: {calibrator} {'with PCA' if use_pca else ''}")
@@ -47,6 +32,7 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
     # Initialize the data preprocessor
     preprocessor = DataPreprocessor(label_name=label_name, missing_method='median', normalize=True, feature_list=feature_list, signal_type=signal_type, lead=lead)
     
+    assert calibrator in ['none', 'platt', 'isotonic']
     assert split_method in ['kfold', 'leaveoneout']
     if split_method == 'leaveoneout':
         num_splits = preprocessor.get_number_of_samples()
@@ -91,7 +77,6 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
             if calibrator == 'platt':
                 calib_model = PlattScaling()
                 calib_model.fit(y_prob_train.reshape(-1, 1), y_train)
-                # Calibrated probabilities on training data
                 y_prob_train_cal = calib_model.predict_proba(y_prob_train.reshape(-1, 1))[:, 1]
             elif calibrator == 'isotonic':
                 calib_model = IsotonicRegression(out_of_bounds='clip')
@@ -148,20 +133,14 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
         num_CVs = num_splits // kfold
         
         for cv_num in range(num_CVs):
-            # Initialize lists to store y_true, y_prob, y_pred for this CV
-            y_true_cv = []
-            y_prob_cv = []
-            y_pred_cv = []
+            y_true_cv, y_prob_cv, y_pred_cv = [], [], []
             
             for fold_num in range(kfold):
-                # Calculate split_index
                 split_index = cv_num * kfold + fold_num
                 
                 # Split the data
                 preprocessor.split_data(method='kfold', n_splits=kfold, split_index=split_index)
                 X_train, X_test, y_train, y_test = preprocessor.get_dataset()
-                
-                # Ensure the labels are integers
                 y_train, y_test = y_train.astype(int), y_test.astype(int)
                 
                 # Apply PCA if requested
@@ -169,7 +148,6 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
                     pca = PCA(n_components=n_components)
                     X_train = pca.fit_transform(X_train)
                     X_test = pca.transform(X_test)
-                    # Update feature names to principal components
                     feature_names = [f'PC_{i+1}' for i in range(X_train.shape[1])]
                 else:
                     # Get feature names
@@ -192,7 +170,6 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
                 if calibrator == 'platt':
                     calib_model = PlattScaling()
                     calib_model.fit(y_prob_train.reshape(-1, 1), y_train)
-                    # Calibrated probabilities on training data
                     y_prob_train_cal = calib_model.predict_proba(y_prob_train.reshape(-1, 1))[:, 1]
                 elif calibrator == 'isotonic':
                     calib_model = IsotonicRegression(out_of_bounds='clip')
@@ -228,8 +205,7 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
                 y_prob_cv.append(y_prob_cal)
                 y_pred_cv.append(y_pred)
             
-            # After all folds in this CV
-            # Concatenate y_true_cv, y_prob_cv, y_pred_cv
+            # After all folds in this CV, concatenate y_true_cv, y_prob_cv, y_pred_cv
             y_true_cv = np.concatenate(y_true_cv)
             y_prob_cv = np.concatenate(y_prob_cv)
             y_pred_cv = np.concatenate(y_pred_cv)
@@ -287,7 +263,6 @@ def compute_feature_importance(clf_name, clf, preprocessor, feature_names, use_p
     if use_pca:
         pca = PCA(n_components=n_components)
         X_train = pca.fit_transform(X_train)
-        # Update feature names to principal components
         feature_names = [f'PC_{i+1}' for i in range(X_train.shape[1])]
         # # print explained_variance_ratio_
         # print(pca.explained_variance_ratio_)
@@ -326,7 +301,6 @@ def compute_shap_feature_importance(clf_name, clf, preprocessor, feature_names, 
     if use_pca:
         pca = PCA(n_components=n_components)
         X_train = pca.fit_transform(X_train)
-        # Update feature names to principal components
         feature_names = [f'PC_{i+1}' for i in range(X_train.shape[1])]
     
     # Fit the classifier on the whole dataset
@@ -356,8 +330,6 @@ def compute_shap_feature_importance(clf_name, clf, preprocessor, feature_names, 
         print(f"Error computing SHAP values for {clf_name}: {e}")
         return
     
-    # For binary classification, shap_values can be a numpy array
-    # For multiclass, it's a list of arrays
     if isinstance(shap_values, list):
         # For binary classification, shap_values[1] corresponds to the positive class
         shap_values = shap_values[1]
@@ -390,8 +362,7 @@ def main():
         'XGBoost': XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
     }
     
-    # Calibrator options
-    # calibrators = ['none', 'platt', 'isotonic']
+    # Calibrator options: 'none', 'platt', 'isotonic'
     calibrators = ['none']
     
     # PCA options
@@ -405,14 +376,10 @@ def main():
     
     # Split method
     split_method = 'kfold'  # Set to 'leaveoneout' for Leave-One-Out CV
-    # K for k-fold (not used in leave-one-out)
-    kfold = 10
-    # Number of splits (will be set inside the function for leave-one-out)
-    num_splits = 200  # Set to None since it will be determined by the number of samples
-    # Signal type
-    signal_type = 'ECG'
-    # Lead
-    lead = 1
+    kfold = 10  # K for k-fold (not used in leave-one-out)
+    num_splits = 200  # Number of splits (will be set inside the function for leave-one-out)
+    signal_type = 'ECG'  # Signal type
+    lead = 1  # Lead
 
     # Set feature list to None to use all features
     hrv_features = [
@@ -453,7 +420,6 @@ def main():
     p_values = perform_statistical_tests(auroc_scores, classifiers_list)
     
     # Compute feature importances using the classifier trained on the whole dataset
-    # Initialize the data preprocessor
     preprocessor = DataPreprocessor(label_name=label_name, missing_method='median', normalize=True, feature_list=feature_list, signal_type=signal_type, lead=lead)
     preprocessor.split_data(method='full')
     X_full, _, y_full, _ = preprocessor.get_dataset()
@@ -466,7 +432,6 @@ def main():
     for clf_name, clf in classifiers.items():
         if clf_name in ['Logistic_Regression', 'Random_Forest', 'XGBoost']:
             compute_feature_importance(clf_name, copy.deepcopy(clf), preprocessor, feature_names_full, use_pca, n_components)
-
 
     # Compute feature importances using SHAP values
     for clf_name, clf in classifiers.items():
