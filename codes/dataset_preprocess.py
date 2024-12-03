@@ -10,9 +10,9 @@ from sklearn.preprocessing import StandardScaler
 # Path to the Excel file
 file_path = '../data/sepsis_01NVa_Sep2024_CHENYANG.xlsx'
 
-def load_signal_features(usubjid, time_window=20, signal_type='PPG', lead=0):
+def load_signal_features(usubjid, time_window=20, signal_type='PPG', lead=1):
     if signal_type == 'PPG':
-        hrv_file = f'../data/HRV/{usubjid}_hrv_{time_window}s.csv'
+        hrv_file = f'../data/PPG/{usubjid}_hrv_{time_window}s.csv'
     elif signal_type == 'ECG':
         hrv_file = f'../data/ECG/{usubjid}_ecg_lead{lead}_{time_window}s.csv'
     if not os.path.exists(hrv_file):
@@ -31,7 +31,9 @@ def load_signal_features(usubjid, time_window=20, signal_type='PPG', lead=0):
         'HRV_MFDFA_alpha1_Increment', 'HRV_ApEn', 'HRV_SampEn', 'HRV_ShanEn', 'HRV_FuzzyEn',
         'HRV_CD', 'HRV_HFD', 'HRV_KFD', 'HRV_LZC'
     ]
-    if signal_type == 'ECG':
+    if signal_type == 'PPG':
+        features_name = features_name + ['PAV']
+    elif signal_type == 'ECG':
         features_name = ['ECG_a_R', 'ECG_RR0', 'ECG_RR1', 'ECG_RR2', 'ECG_RRm', 'ECG_RR_0_1', 'ECG_RR_2_1', 'ECG_RR_m_1', 'ECG_t_PR', 
                         'ECG_t_QR', 'ECG_t_RS',	'ECG_t_RT', 'ECG_t_PQ', 'ECG_t_PS', 'ECG_t_PT', 'ECG_t_QS', 'ECG_t_QT', 'ECG_t_ST', 
                         'ECG_a_PQ', 'ECG_a_QR', 'ECG_a_RS', 'ECG_a_ST', 'ECG_a_PS', 'ECG_a_PT', 'ECG_a_QS', 'ECG_a_QT', 'ECG_a_ST_QS', 
@@ -50,23 +52,15 @@ def load_signal_features(usubjid, time_window=20, signal_type='PPG', lead=0):
         # remove infinite values
         valid_idx = np.isfinite(y)
         X, y = X[valid_idx], y[valid_idx]
+        if signal_type == 'PPG':
+            feature = f'PPG_{feature}'
+        elif signal_type == 'ECG' and feature[:3] != 'ECG':
+            feature = f'ECG_{feature}'
         feature_dict[f'{feature}_mean'] = y.mean()
         feature_dict[f'{feature}_var'] = y.var()
-        if len(y) > 1:
-            model = LinearRegression().fit(X, y)
-            y_pred = model.predict(X)
-            feature_dict[f'{feature}_slope'] = model.coef_[0]
-            feature_dict[f'{feature}_intercept'] = model.intercept_
-            feature_dict[f'{feature}_rmse'] = np.sqrt(mean_squared_error(y, y_pred))
-            feature_dict[f'{feature}_r2'] = r2_score(y, y_pred)
-        else:
-            feature_dict[f'{feature}_slope'] = np.nan
-            feature_dict[f'{feature}_intercept'] = np.nan
-            feature_dict[f'{feature}_rmse'] = np.nan
-            feature_dict[f'{feature}_r2'] = np.nan
     return feature_dict
 
-def load_excel(time_window=20, signal_type='ECG', lead=0):
+def load_excel(time_window=20):
     # Load the Excel file
     excel_data = pd.ExcelFile(file_path)
     
@@ -134,16 +128,6 @@ def load_excel(time_window=20, signal_type='ECG', lead=0):
             y = valid_data[var].values
             result[f'{var}_mean'] = y.mean()
             result[f'{var}_var'] = y.var()
-            if len(y) > 1:
-                model = LinearRegression().fit(X, y)
-                y_pred = model.predict(X)
-                result[f'{var}_slope'] = model.coef_[0]
-                result[f'{var}_intercept'] = model.intercept_
-                result[f'{var}_rmse'] = np.sqrt(mean_squared_error(y, y_pred))
-                result[f'{var}_r2'] = r2_score(y, y_pred)
-            else:
-                for stat in ['slope', 'intercept', 'rmse', 'r2']:
-                    result[f'{var}_{stat}'] = np.nan
         feature_DAILY_VITAL.append(result)
     feature_DAILY_VITAL = pd.DataFrame(feature_DAILY_VITAL)
 
@@ -153,13 +137,23 @@ def load_excel(time_window=20, signal_type='ECG', lead=0):
     features = features.merge(feature_CLI, on='USUBJID', how='outer')
     features = features.merge(feature_DAILY_VITAL, on='USUBJID', how='outer')
 
-    # Process PPG HRV data for each patient
+    # Add PPG features for each patient
     signal_features = []
     for usubjid in features['USUBJID']:
-        hrv_features = load_signal_features(usubjid, time_window=time_window, signal_type=signal_type, lead=lead)
+        hrv_features = load_signal_features(usubjid, time_window=time_window, signal_type='PPG')
         if hrv_features is not None:
             hrv_features['USUBJID'] = usubjid
             signal_features.append(hrv_features)
+    signal_features_df = pd.DataFrame(signal_features)
+    features = features.merge(signal_features_df, on='USUBJID', how='left')
+
+    # Add ECG features for each patient
+    signal_features = []
+    for usubjid in features['USUBJID']:
+        hrv_features = load_signal_features(usubjid, time_window=time_window, signal_type='ECG', lead=1)
+        if hrv_features is not None:
+            hrv_features['USUBJID'] = usubjid
+            signal_features.append(hrv_features)    
     signal_features_df = pd.DataFrame(signal_features)
     features = features.merge(signal_features_df, on='USUBJID', how='left')
 
@@ -190,11 +184,11 @@ def load_excel(time_window=20, signal_type='ECG', lead=0):
 
 
 class DataPreprocessor:
-    def __init__(self, label_name='DIED', missing_method='median', normalize=True, feature_list=None, signal_type='ECG', lead=0):
+    def __init__(self, label_name='DIED', missing_method='median', normalize=True, feature_list=None):
         assert label_name in ['DIED', 'HFNOV', 'MEVEN', 'OUTCOME', 'CULTURE_RESULT']
         assert missing_method in [None, 'median']
 
-        features, labels = load_excel(time_window=20, signal_type=signal_type, lead=lead)
+        features, labels = load_excel(time_window=20)
 
         if feature_list is not None:
             # only keep the features in the feature_list
