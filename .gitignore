@@ -1,5 +1,8 @@
-# ignore data folder
-data/
+# ignore data/01NVa_Sepsis folder
+data/01NVa_Sepsis/
+
+# ignore the file data/ecg_segments_20s_lead1_end60min.pkl
+data/ecg_segments_20s_lead1_end60min.pkl
 
 # ignore __pycache__
 __pycache__/
