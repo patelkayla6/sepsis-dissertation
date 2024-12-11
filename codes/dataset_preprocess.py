@@ -157,6 +157,18 @@ def load_excel(time_window=20):
     signal_features_df = pd.DataFrame(signal_features)
     features = features.merge(signal_features_df, on='USUBJID', how='left')
 
+    # Add NEWS score and SOFA score for each patient
+    news_csv = pd.read_csv('../data/SOFANEWS SCORES_CHENYANG_27.csv')
+    news_csv = news_csv[['USUBJID', 'NEWS_ADM', 'NEWS_ENR', 'SOFA_ADM', 'SOFA_enr']]
+    features = features.merge(news_csv, on='USUBJID', how='left')
+
+    # Save the names of the features as a file
+    feature_names = features.columns
+    if not os.path.exists('../data/feature_names.txt'):
+        with open('../data/feature_names.txt', 'w') as f:
+            for name in feature_names:
+                f.write(f"'{name}', ")
+
     # Load and process labels
     label_CLI = pd.read_excel(excel_data, 'CLI')
     label_columns = ['DIED', 'HFNOV', 'MEVEN']
@@ -197,6 +209,11 @@ class DataPreprocessor:
         # Select IDs with non-missing labels and available features
         IDs_with_labels = labels[labels[label_name].notna()].index
         ID_list = IDs_with_labels.intersection(features.index)
+
+        # Remove patients died within 24 hours if label_name is 'DIED'
+        if label_name == 'DIED':
+            remove_ids = ['003-1011', '003-1016', '003-1017', '003-1214', '003-1219', '003-1239']
+            ID_list = ID_list.difference(remove_ids)
 
         self.features = features.loc[ID_list]
         self.labels = labels.loc[ID_list, label_name]
