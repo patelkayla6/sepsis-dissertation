@@ -75,14 +75,40 @@ def predict_with_calibrator(clf, calib_model, X_test, calibrator):
         y_prob_cal = y_prob
     return y_prob_cal
 
-def process_single_split(preprocessor, clf, calibrator, use_pca, n_components, feature_names):
-    """Process a single data split: train, calibrate, and predict."""
+from sklearn.feature_selection import RFE
+
+def process_single_split(preprocessor, clf, calibrator, use_pca, n_components, feature_names, use_RFE=False, RFE_feature_number=None):
+    """Process a single data split: train, optionally perform RFE, calibrate, and predict."""
     X_train, X_test, y_train, y_test, feature_names = prepare_data(preprocessor, use_pca, n_components, feature_names)
+
+    if use_RFE:
+        if RFE_feature_number is None:
+            raise ValueError("RFE_feature_number must be provided when use_RFE is True.")
+        
+        # Apply RFE to select features
+        rfe = RFE(estimator=clf, n_features_to_select=RFE_feature_number, step=1)
+        rfe.fit(X_train, y_train)
+        
+        # Transform training and test sets
+        X_train = rfe.transform(X_train)
+        X_test = rfe.transform(X_test)
+
+        # Update feature names based on RFE selection
+        if feature_names is not None:
+            feature_names = [f for f, s in zip(feature_names, rfe.support_) if s]
+
+    # Fit and calibrate classifier
     clf, calib_model, y_prob_train_cal = fit_and_calibrate_classifier(clf, X_train, y_train, calibrator)
+
+    # Compute the optimal threshold on the training set
     optimal_threshold = compute_optimal_threshold(y_train, y_prob_train_cal)
+
+    # Predict on test set using the calibrator
     y_prob_cal = predict_with_calibrator(clf, calib_model, X_test, calibrator)
     y_pred = (y_prob_cal >= optimal_threshold).astype(int)
+
     return y_test, y_prob_cal, y_pred, feature_names
+
 
 def compute_metrics(y_true, y_pred, y_prob):
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
@@ -100,9 +126,13 @@ def compute_metrics(y_true, y_pred, y_prob):
     }
 
 def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', split_method='kfold', kfold=5,
-                                  num_splits=50, use_pca=False, n_components=None, feature_list=None):
+                                  num_splits=50, use_pca=False, n_components=None, feature_list=None, 
+                                  use_RFE=False, RFE_feature_number=None):
     """Train and evaluate the classifier using specified cross-validation method."""
-    print(f"\nClassifier: {clf_name} with Calibrator: {calibrator} {'with PCA' if use_pca else ''}")
+    print(f"\nClassifier: {clf_name} with Calibrator: {calibrator} "
+          f"{'with PCA' if use_pca else ''} "
+          f"{'with RFE' if use_RFE else ''}{f' (selecting {RFE_feature_number} features)' if use_RFE else ''}")
+
     metrics_list = []
     auroc_list = []
     feature_names = None
@@ -121,7 +151,7 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
             preprocessor.split_data(method='leaveoneout', split_index=split_index)
             y_test, y_prob_cal, y_pred, feature_names = process_single_split(preprocessor, copy.deepcopy(clf),
                                                                              calibrator, use_pca, n_components,
-                                                                             feature_names)
+                                                                             feature_names, use_RFE, RFE_feature_number)
             y_true_list.append(y_test)
             y_prob_list.append(y_prob_cal)
             y_pred_list.append(y_pred)
@@ -148,7 +178,7 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
                 preprocessor.split_data(method='kfold', n_splits=kfold, split_index=split_index)
                 y_test, y_prob_cal, y_pred, feature_names = process_single_split(preprocessor, copy.deepcopy(clf),
                                                                                  calibrator, use_pca, n_components,
-                                                                                 feature_names)
+                                                                                 feature_names, use_RFE, RFE_feature_number)
                 y_true_cv.append(y_test)
                 y_prob_cv.append(y_prob_cal)
                 y_pred_cv.append(y_pred)
@@ -299,13 +329,15 @@ def main():
     split_method = 'kfold'
     kfold = 10
     num_splits = 200
+    use_RFE = True
+    RFE_feature_number=50
 
     for calibrator in calibrators:
         for clf_name, clf in classifiers.items():
             combined_name = f"{clf_name}_{calibrator}{'_PCA' if use_pca else ''}"
             metrics_list, auroc_list, feature_names = train_and_evaluate_classifier(
                 clf_name, copy.deepcopy(clf), label_name, calibrator, split_method, kfold, num_splits,
-                use_pca, n_components, feature_list)
+                use_pca, n_components, feature_list, use_RFE, RFE_feature_number)
             auroc_scores[combined_name] = auroc_list
 
     classifiers_list = list(auroc_scores.keys())
