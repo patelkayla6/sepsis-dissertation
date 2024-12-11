@@ -6,3 +6,6 @@ data/ecg_segments_20s_lead1_end60min.pkl
 
 # ignore __pycache__
 __pycache__/
+
+# ignore all .DS_Store folders
+.DS_Store

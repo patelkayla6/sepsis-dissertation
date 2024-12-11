@@ -121,7 +121,7 @@ def load_excel(time_window=20):
         for var in variables:
             valid_data = group[['VITAL_VITAL_SEQ', var]].dropna()
             if valid_data.empty:
-                for stat in ['mean', 'var', 'slope', 'intercept', 'rmse', 'r2']:
+                for stat in ['mean', 'var']:
                     result[f'{var}_{stat}'] = np.nan
                 continue
             X = valid_data['VITAL_VITAL_SEQ'].values.reshape(-1, 1)

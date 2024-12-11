@@ -230,7 +230,6 @@ def compute_shap_feature_importance(clf_name, clf, preprocessor, use_pca=False, 
     """Compute and display feature importance using SHAP values."""
     clf, feature_names, X_train, y_train = train_classifier_on_full_data(clf_name, clf, preprocessor, use_pca, n_components)
     print(f"\nTop 20 Most Important Features for {clf_name} using SHAP values trained on the whole dataset{' with PCA' if use_pca else ''}:")
-
     try:
         if clf_name.startswith('Logistic_Regression'):
             explainer = shap.LinearExplainer(clf, X_train)
@@ -245,10 +244,11 @@ def compute_shap_feature_importance(clf_name, clf, preprocessor, use_pca=False, 
         print(f"Error computing SHAP values for {clf_name}: {e}")
         return
 
-    if isinstance(shap_values, list):
-        shap_values = shap_values[1]
+    if len(shap_values.shape) == 3:
+        shap_values = shap_values[:,:,1]
 
     importances = np.abs(shap_values).mean(axis=0)
+
     importances_df = pd.DataFrame({'Feature': feature_names, 'Importance': importances})
     importances_df = importances_df.sort_values(by='Importance', ascending=False)
     print(importances_df.head(20).to_string(index=False))
