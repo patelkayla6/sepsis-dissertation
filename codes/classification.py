@@ -13,7 +13,7 @@ from sklearn.decomposition import PCA
 from sklearn.isotonic import IsotonicRegression
 import warnings
 from dataset_preprocess import DataPreprocessor
-from utils import set_seed
+from utils import *
 from scipy.stats import wilcoxon
 import copy
 from itertools import combinations
@@ -129,7 +129,8 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
                                   num_splits=50, use_pca=False, n_components=None, feature_list=None, 
                                   use_RFE=False, RFE_feature_number=None):
     """Train and evaluate the classifier using specified cross-validation method."""
-    print(f"\nClassifier: {clf_name} with Calibrator: {calibrator} "
+    print(f"\nClassifier: {clf_name} "
+          f"{f'with calibrator {calibrator}' if calibrator is not 'none' else ''} "
           f"{'with PCA' if use_pca else ''} "
           f"{'with RFE' if use_RFE else ''}{f' (selecting {RFE_feature_number} features)' if use_RFE else ''}")
 
@@ -301,35 +302,14 @@ def main():
 
     auroc_scores = {}
 
-    hrv_features = [
-        'HRV_MeanNN', 'HRV_SDNN', 'HRV_RMSSD', 'HRV_SDSD', 'HRV_CVNN', 'HRV_CVSD', 'HRV_MedianNN',
-        'HRV_MadNN', 'HRV_MCVNN', 'HRV_IQRNN', 'HRV_SDRMSSD', 'HRV_Prc20NN', 'HRV_Prc80NN',
-        'HRV_pNN50', 'HRV_pNN20', 'HRV_MinNN', 'HRV_MaxNN', 'HRV_HTI', 'HRV_TINN', 'HRV_HF',
-        'HRV_VHF', 'HRV_TP', 'HRV_HFn', 'HRV_LnHF', 'HRV_SD1', 'HRV_SD2', 'HRV_SD1SD2', 'HRV_S',
-        'HRV_CSI', 'HRV_CVI', 'HRV_CSI_Modified', 'HRV_PIP', 'HRV_IALS', 'HRV_PSS', 'HRV_PAS',
-        'HRV_GI', 'HRV_SI', 'HRV_AI', 'HRV_PI', 'HRV_C1d', 'HRV_C1a', 'HRV_SD1d', 'HRV_SD1a',
-        'HRV_C2d', 'HRV_C2a', 'HRV_SD2d', 'HRV_SD2a', 'HRV_Cd', 'HRV_Ca', 'HRV_SDNNd',
-        'HRV_SDNNa', 'HRV_DFA_alpha1', 'HRV_MFDFA_alpha1_Width', 'HRV_MFDFA_alpha1_Peak',
-        'HRV_MFDFA_alpha1_Mean', 'HRV_MFDFA_alpha1_Max', 'HRV_MFDFA_alpha1_Delta',
-        'HRV_MFDFA_alpha1_Asymmetry', 'HRV_MFDFA_alpha1_Fluctuation',
-        'HRV_MFDFA_alpha1_Increment', 'HRV_ApEn', 'HRV_SampEn', 'HRV_ShanEn', 'HRV_FuzzyEn',
-        'HRV_CD', 'HRV_HFD', 'HRV_KFD', 'HRV_LZC'
-    ]
-    hrv_features = ['ECG_' + feature for feature in hrv_features]
-    ecg_features = [
-        'ECG_a_R', 'ECG_RR0', 'ECG_RR1', 'ECG_RR2', 'ECG_RRm', 'ECG_RR_0_1', 'ECG_RR_2_1',
-        'ECG_RR_m_1', 'ECG_t_PR', 'ECG_t_QR', 'ECG_t_RS', 'ECG_t_RT', 'ECG_t_PQ', 'ECG_t_PS',
-        'ECG_t_PT', 'ECG_t_QS', 'ECG_t_QT', 'ECG_t_ST', 'ECG_a_PQ', 'ECG_a_QR', 'ECG_a_RS',
-        'ECG_a_ST', 'ECG_a_PS', 'ECG_a_PT', 'ECG_a_QS', 'ECG_a_QT', 'ECG_a_ST_QS', 'ECG_a_RS_QR'
-    ] + hrv_features
+    feature_list = normal_feature_names + ECG_feature_names + PPG_feature_names
+    # feature_list = []
 
-    feature_type = ['mean', 'var']
-    feature_list = [feature + '_' + ftype for feature in ecg_features for ftype in feature_type]
 
     split_method = 'kfold'
     kfold = 10
     num_splits = 200
-    use_RFE = True
+    use_RFE = False
     RFE_feature_number=50
 
     for calibrator in calibrators:
