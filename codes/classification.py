@@ -11,6 +11,8 @@ from xgboost import XGBClassifier
 from sklearn.linear_model import LogisticRegression as PlattScaling
 from sklearn.decomposition import PCA
 from sklearn.isotonic import IsotonicRegression
+from sklearn.neural_network import MLPClassifier
+from sklearn.feature_selection import RFE
 import warnings
 from dataset_preprocess import DataPreprocessor
 from utils import *
@@ -74,8 +76,6 @@ def predict_with_calibrator(clf, calib_model, X_test, calibrator):
     else:
         y_prob_cal = y_prob
     return y_prob_cal
-
-from sklearn.feature_selection import RFE
 
 def process_single_split(preprocessor, clf, calibrator, use_pca, n_components, feature_names, use_RFE=False, RFE_feature_number=None):
     """Process a single data split: train, optionally perform RFE, calibrate, and predict."""
@@ -298,11 +298,11 @@ def main():
 
     calibrators = ['none']
     use_pca = False
-    n_components = 50
+    n_components = 64
 
     auroc_scores = {}
 
-    feature_list = normal_feature_names + ECG_feature_names + PPG_feature_names
+    feature_list = normal_feature_names
     # feature_list = []
 
 
@@ -310,7 +310,7 @@ def main():
     kfold = 10
     num_splits = 200
     use_RFE = False
-    RFE_feature_number=50
+    RFE_feature_number=100
 
     for calibrator in calibrators:
         for clf_name, clf in classifiers.items():

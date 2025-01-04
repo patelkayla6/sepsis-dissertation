@@ -263,11 +263,11 @@ class DataPreprocessor:
             raise ValueError('Invalid method for data splitting')
 
         if self.missing_method:
-            self.deal_with_missing(method=self.missing_method)
+            self._deal_with_missing(method=self.missing_method)
         if self.normalize:
-            self.normalize_features()
+            self._normalize_features()
 
-    def deal_with_missing(self, method='median'):
+    def _deal_with_missing(self, method='median'):
         if method == 'median':
             # Fill numerical columns with the median of the training set
             numerical_cols = self.X_train.select_dtypes(include=[np.number]).columns
@@ -287,7 +287,7 @@ class DataPreprocessor:
         else:
             raise ValueError('Invalid method to deal with missing values')
 
-    def normalize_features(self):
+    def _normalize_features(self):
         numerical_cols = self.X_train.select_dtypes(include=[np.number]).columns
         if len(numerical_cols) > 0:
             scaler = StandardScaler()
