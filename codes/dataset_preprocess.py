@@ -10,9 +10,9 @@ from sklearn.preprocessing import StandardScaler
 # Path to the Excel file
 file_path = '../data/sepsis_01NVa_Sep2024_CHENYANG.xlsx'
 
-def load_signal_features(usubjid, time_window=20, signal_type='PPG', lead=1):
-    if signal_type == 'PPG':
-        hrv_file = f'../data/PPG/{usubjid}_hrv_{time_window}s.csv'
+def load_signal_features(usubjid, time_window=20, signal_type='PPG_old', lead=1):
+    if signal_type == 'PPG_old':
+        hrv_file = f'../data/PPG_old/{usubjid}_hrv_{time_window}s.csv'
     elif signal_type == 'ECG':
         hrv_file = f'../data/ECG/{usubjid}_ecg_lead{lead}_{time_window}s.csv'
     if not os.path.exists(hrv_file):
@@ -31,7 +31,7 @@ def load_signal_features(usubjid, time_window=20, signal_type='PPG', lead=1):
         'HRV_MFDFA_alpha1_Increment', 'HRV_ApEn', 'HRV_SampEn', 'HRV_ShanEn', 'HRV_FuzzyEn',
         'HRV_CD', 'HRV_HFD', 'HRV_KFD', 'HRV_LZC'
     ]
-    if signal_type == 'PPG':
+    if signal_type == 'PPG_old':
         features_name = features_name + ['PAV']
     elif signal_type == 'ECG':
         features_name = ['ECG_a_R', 'ECG_RR0', 'ECG_RR1', 'ECG_RR2', 'ECG_RRm', 'ECG_RR_0_1', 'ECG_RR_2_1', 'ECG_RR_m_1', 'ECG_t_PR', 
@@ -52,7 +52,7 @@ def load_signal_features(usubjid, time_window=20, signal_type='PPG', lead=1):
         # remove infinite values
         valid_idx = np.isfinite(y)
         X, y = X[valid_idx], y[valid_idx]
-        if signal_type == 'PPG':
+        if signal_type == 'PPG_old':
             feature = f'PPG_{feature}'
         elif signal_type == 'ECG' and feature[:3] != 'ECG':
             feature = f'ECG_{feature}'
@@ -137,10 +137,10 @@ def load_excel(time_window=20):
     features = features.merge(feature_CLI, on='USUBJID', how='outer')
     features = features.merge(feature_DAILY_VITAL, on='USUBJID', how='outer')
 
-    # Add PPG features for each patient
+    # Add PPG_old features for each patient
     signal_features = []
     for usubjid in features['USUBJID']:
-        hrv_features = load_signal_features(usubjid, time_window=time_window, signal_type='PPG')
+        hrv_features = load_signal_features(usubjid, time_window=time_window, signal_type='PPG_old')
         if hrv_features is not None:
             hrv_features['USUBJID'] = usubjid
             signal_features.append(hrv_features)

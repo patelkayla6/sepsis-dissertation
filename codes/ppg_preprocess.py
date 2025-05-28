@@ -5,12 +5,12 @@ import os
 from datetime import datetime
 from sqi import ppg_quality
 import re
-
+import glob
 
 def find_patient_ppg_path(base_path, patient):
-    for folder in os.listdir(base_path):
-        if patient in folder:
-            return os.path.join(base_path, folder, 'PPG')
+    # for folder in os.listdir(base_path):
+    if patient in os.listdir(base_path):
+        return os.path.join(base_path, patient, '*', 'PPG_old')
     print(f"Patient {patient} not found.")
     return None
 
@@ -105,12 +105,12 @@ def compute_hrv_metrics(peaks_dict, sampling_rate):
 def save_ppg_features(patient, time_window=20):
     if os.path.exists(f'../data/HRV/{patient}_hrv_{time_window}s.csv'):
         return
-    base_path = '../data/01NVa_Sepsis/RAW_DATA/'
+    base_path = '/mnt/Data2/data/vital/RAW_DATA/'
     path = find_patient_ppg_path(base_path, patient)
     if path is None:
         return
 
-    ppg_files = [os.path.join(path, f) for f in os.listdir(path) if f.endswith('.csv')]
+    ppg_files = glob.glob(os.path.join(path, '*csv')) # [os.path.join(path, f) for f in os.listdir(path) if f.endswith('.csv')]
     ppg_files = sort_ppg_files(ppg_files)
     concatenated_df = process_ppg_files(ppg_files)
     concatenated_df = resample_ppg_data(concatenated_df)
@@ -165,14 +165,13 @@ def save_ppg_features(patient, time_window=20):
         if not os.path.exists(output_path):
             os.makedirs(output_path)
         hrv_df.to_csv(os.path.join(output_path, f"{patient}_hrv_{time_window}s.csv"), index=False)
-        print(f"PPG signal processing and HRV calculation complete for {patient}.")
+        print(f"PPG_old signal processing and HRV calculation complete for {patient}.")
     else:
-        print(f"No valid HRV data was found in the PPG signal for {patient}.")
+        print(f"No valid HRV data was found in the PPG_old signal for {patient}.")
 
 
 # # Example usage
-# for i in range(1001, 1260):
-#     try:
-#         save_ppg_features(f"003-{i}", time_window=20)
-#     except Exception as e:
-#         print(f"Error processing patient {i}: {e}")
+for i in range(1000, 1260):
+    save_ppg_features(f"01NVa-003-{i}", time_window=20)
+    # except Exception as e:
+    #     print(f"Error processing patient {i}: {e}")

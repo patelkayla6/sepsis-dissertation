@@ -333,7 +333,7 @@ def main():
     }
 
     calibrators = ['none']
-    use_pca = True
+    use_pca = False
     n_components = 0.9
 
     auroc_scores, auprc_scores = {}, {}
