@@ -6,7 +6,7 @@ from datetime import datetime
 import re
 import glob
 
-from codes.sqi import flat_sqi
+from preprocessing_utils import flat_sqi
 from ppg_feature import PPG_feature
 from tqdm import tqdm
 
@@ -86,7 +86,9 @@ def save_ppg_features(patient, time_window=20):
     path = find_patient_ppg_path(base_path, patient)
     if path is None:
         return
-    ppg_files = glob.glob(os.path.join(path, '*csv')) # [os.path.join(path, f) for f in os.listdir(path) if f.endswith('.csv')]
+    ppg_files = glob.glob(os.path.join(path, '*csv'))
+    if len(ppg_files) == 0:
+        return
     ppg_files = sort_ppg_files(ppg_files)
     concatenated_df = process_ppg_files(ppg_files)
     concatenated_df = resample_ppg_data(concatenated_df)
@@ -105,10 +107,6 @@ def save_ppg_features(patient, time_window=20):
     segment_number = df_ppg['Segment_ID'].max()
     print(f'Continuous Segment Number {segment_number}')
     for segment_id, segment_df in df_ppg.groupby("Segment_ID"):
-        if segment_id < 40:
-            continue
-        else:
-            print(segment_id)
         segment_ppg = segment_df["ppg"].values
         segment_timestamps = segment_df["TIMESTAMP_MS"].values
         num_samples_segment = len(segment_ppg)
@@ -133,9 +131,15 @@ def save_ppg_features(patient, time_window=20):
 
     if feature_list:
         feature_df = pd.concat(feature_list, ignore_index=True)
+
+        cols = feature_df.columns.tolist()
+        cols.remove("Time_Elapsed_Seconds")
+        feature_df = feature_df[["Time_Elapsed_Seconds"] + cols]
+
         output_path = '../data/PPG/'
         if not os.path.exists(output_path):
             os.makedirs(output_path)
+
         feature_df.to_csv(os.path.join(output_path, f"{patient}_{time_window}s.csv"), index=False)
         print(f"PPG signal processing and HRV calculation complete for {patient}.")
     else:
@@ -144,5 +148,5 @@ def save_ppg_features(patient, time_window=20):
 
 # # Example usage
 if __name__ == '__main__':
-    for i in range(1000, 1260):
+    for i in range(1145, 1260): #45 is error
         save_ppg_features(f"01NVa-003-{i}", time_window=20)
