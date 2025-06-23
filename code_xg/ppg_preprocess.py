@@ -148,5 +148,5 @@ def save_ppg_features(patient, time_window=20):
 
 # # Example usage
 if __name__ == '__main__':
-    for i in range(1145, 1260): #45 is error
+    for i in range(1001, 1260): #45 is error
         save_ppg_features(f"01NVa-003-{i}", time_window=20)
