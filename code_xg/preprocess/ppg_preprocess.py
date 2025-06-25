@@ -136,7 +136,7 @@ def save_ppg_features(patient, time_window=20):
         cols.remove("Time_Elapsed_Seconds")
         feature_df = feature_df[["Time_Elapsed_Seconds"] + cols]
 
-        output_path = '../data/PPG/'
+        output_path = '../../data/PPG/'
         if not os.path.exists(output_path):
             os.makedirs(output_path)
 
@@ -148,5 +148,5 @@ def save_ppg_features(patient, time_window=20):
 
 # # Example usage
 if __name__ == '__main__':
-    for i in range(1001, 1260): #45 is error
+    for i in range(1001, 1002): #45 is error
         save_ppg_features(f"01NVa-003-{i}", time_window=20)

@@ -31,7 +31,7 @@ def load_signal_features(usubjid, time_window=20, signal_type='PPG_old', lead=1)
         'HRV_MFDFA_alpha1_Increment', 'HRV_ApEn', 'HRV_SampEn', 'HRV_ShanEn', 'HRV_FuzzyEn',
         'HRV_CD', 'HRV_HFD', 'HRV_KFD', 'HRV_LZC'
     ]
-    if signal_type == 'PPG_old':
+    if signal_type == 'PPG':
         features_name = features_name + ['PAV']
     elif signal_type == 'ECG':
         features_name = ['ECG_a_R', 'ECG_RR0', 'ECG_RR1', 'ECG_RR2', 'ECG_RRm', 'ECG_RR_0_1', 'ECG_RR_2_1', 'ECG_RR_m_1', 'ECG_t_PR', 

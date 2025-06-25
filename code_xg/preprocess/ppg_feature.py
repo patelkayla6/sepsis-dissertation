@@ -85,7 +85,7 @@ def PPG_feature(sig, fs):
     return pd.DataFrame([feature_vals], columns=feature_names)
 
 if __name__ == '__main__':
-    ppg = np.squeeze(scipy.io.loadmat('../test/Sample_PPG_MAT_125Hz.mat').get('Data'))[0:125*20]
+    ppg = np.squeeze(scipy.io.loadmat('../../test/Sample_PPG_MAT_125Hz.mat').get('Data'))[0:125 * 20]
     feat = PPG_feature(ppg, 125)
     print(feat)
 
