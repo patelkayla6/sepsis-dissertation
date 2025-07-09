@@ -227,6 +227,10 @@ class DataPreprocessor:
         self.features = features.loc[ID_list]
         self.labels = labels.loc[ID_list, label_name]
 
+        # (self.features['AGE'][self.labels == 0]).quantile(0.25).round()
+        # (self.features['AGE'][self.labels == 0]).quantile(0.25).round()
+        # (self.features['AGE'][self.labels == 0]).median().round()
+
         # One-hot encode categorical variables
         categorical_cols = self.features.select_dtypes(include=['object']).columns
         if len(categorical_cols) > 0:

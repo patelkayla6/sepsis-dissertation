@@ -81,7 +81,7 @@ def fit_and_calibrate_classifier(clf, X_train, y_train, calibrator):
     return clf, calib_model, y_prob_train_cal
 
 def compute_optimal_threshold(y_train, y_prob_train_cal):
-    """Compute the optimal threshold based on the training data."""
+    """Compute the optimal threshold based on the trdaining data."""
     fpr, tpr, thresholds = roc_curve(y_train, y_prob_train_cal)
     optimal_idx = np.argmax(tpr - fpr)
     return thresholds[optimal_idx]
@@ -345,9 +345,9 @@ def main():
     print('ppg feature name', PPG_feature_names)
     print('ecg feature name', ECG_feature_names)
 
-    split_method = 'kfold'
+    split_method = 'kfold' #'kfold'
     kfold = 10
-    num_splits = 100 # ten times
+    num_splits = 200 # ten times
     use_RFE = False
     RFE_feature_number=100
 
