@@ -66,6 +66,7 @@ def load_signal_features(usubjid, time_window=20, signal_type='PPG', lead=1):
         feature_dict[f'{feature}_var'] = y.var()
         feature_dict[f'{feature}_skew'] = skew(y, nan_policy='omit')
         feature_dict[f'{feature}_kurt'] = kurtosis(y, nan_policy='omit')
+        feature_dict[f'{feature}_median'] = np.nanmedian(y)
 
     return feature_dict
 
@@ -194,6 +195,14 @@ def load_excel(time_window=20):
     features = features.set_index('USUBJID')
     labels = labels.set_index('USUBJID')
 
+    # Add sofalabel
+    news_csv = pd.read_csv('../data/SOFANEWS SCORES_CHENYANG_27.csv')
+    label_sofa = news_csv[['USUBJID','SOFA_ADM_D2','SOFA_ENR_D2']]
+    label_sofa.set_index('USUBJID')
+    labels = label_sofa.merge(labels, on='USUBJID', how='left')
+
+    labels = labels.set_index('USUBJID')
+
     # Align features and labels
     common_usubjid = features.index.intersection(labels.index)
     features = features.loc[common_usubjid]
@@ -206,7 +215,7 @@ def load_excel(time_window=20):
 
 class DataPreprocessor:
     def __init__(self, label_name='DIED', missing_method='median', normalize=True, feature_list=None):
-        assert label_name in ['DIED', 'HFNOV', 'MEVEN', 'OUTCOME', 'CULTURE_RESULT']
+        assert label_name in ['DIED', 'HFNOV', 'MEVEN', 'OUTCOME', 'CULTURE_RESULT', 'SOFA_ENR_D2', 'SOFA_ADM_D2']
         assert missing_method in [None, 'median']
 
         features, labels = load_excel(time_window=20)
@@ -226,6 +235,10 @@ class DataPreprocessor:
 
         self.features = features.loc[ID_list]
         self.labels = labels.loc[ID_list, label_name]
+
+        if (label_name == 'SOFA_ENR_D2') or (label_name == 'SOFA_ADM_D2'):
+            self.labels[self.labels>=0] = 0
+            self.labels[self.labels<0] = 1
 
         # (self.features['AGE'][self.labels == 0]).quantile(0.25).round()
         # (self.features['AGE'][self.labels == 0]).quantile(0.25).round()
