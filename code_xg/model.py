@@ -47,6 +47,20 @@ class RunningAverage:
         self.sum = 0.0
         self.count = 0
 
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-np.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.pe = pe.unsqueeze(0)
+
+    def forward(self, x):
+        return x + self.pe[:, :x.size(1)].to(x.device)
+
 def load_patient_signal(file_path, feats):
     df = pd.read_csv(file_path, usecols=feats)
     df = df.fillna(method='ffill').fillna(df.mean())
@@ -104,6 +118,26 @@ class GRUFeatureEncoder(nn.Module):
         y_pred = self.reconstruction(z)
         return y_pred, z
 
+class TransformerFeatureEncoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim=64, projection_dim=32, num_heads=4, num_layers=2):
+        super().__init__()
+        self.input_proj = nn.Linear(input_dim, hidden_dim)
+        self.pos_enc = PositionalEncoding(hidden_dim)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=num_heads, batch_first=True)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.projection = nn.Linear(hidden_dim, projection_dim)
+        self.reconstruction = nn.Linear(projection_dim, input_dim)
+
+    def forward(self, x):
+        x = self.input_proj(x)
+        x = self.pos_enc(x)
+        x = self.transformer(x)
+        h = x[:, -1, :]
+        z = self.projection(h)
+        y_pred = self.reconstruction(z)
+        return y_pred, z
+
+
 def train_autoregressive(model, dataloader, epochs=100):
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     loss_fn = nn.MSELoss()
@@ -138,9 +172,9 @@ if __name__ == '__main__':
 
     print(f"Loading data")
     dataset = HDF5HRVDataset(h5_path)
-    loader = DataLoader(dataset, batch_size=256, shuffle=True)
+    loader = DataLoader(dataset, batch_size=256, shuffle=True, pin_memory=True, num_workers=8)
 
     print("Loading model")
-    model = GRUFeatureEncoder(input_dim=len(PPG_feature_bases), hidden_dim=128, projection_dim=128).to(device)
+    model = TransformerFeatureEncoder(input_dim=len(PPG_feature_bases), hidden_dim=128, projection_dim=128).to(device)
     train_autoregressive(model, loader, epochs=100)
 
