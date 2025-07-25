@@ -38,11 +38,16 @@ PPG_feature_bases = [
 # --- Data Loading & Preprocessing ---
 def load_patient_signal(file_path, feats):
     df = pd.read_csv(file_path, usecols=feats)
+    # Step 1: ffill then fill remaining NaNs with column mean
     df = df.fillna(method='ffill').fillna(df.mean())
+
+    # Step 2: Z-score normalization for each column
     for col in df.columns:
-        m, s = df[col].mean(), df[col].std()
+        m = df[col].mean()
+        s = df[col].std()
         df[col] = (df[col] - m) / (s + 1e-6)
-        df[col] = df[col].fillna(0.0)
+        df[col] = df[col].fillna(0.0)  # Handle potential post-norm NaNs
+
     return df.to_numpy(dtype=np.float32)
 
 from model import GPTFeatureModel
@@ -82,27 +87,37 @@ class GPTFeatureExtractor(nn.Module):
 
 
 # --- Embedding Extraction ---
-def extract_patient_embeddings_last_step(model, csv_paths, feats):
+def extract_gpt_embeddings(model, csv_paths, feats, window_len=180):
     model.eval()
-    embeddings = []
-    ids = []
-    for path in tqdm(csv_paths, desc="Extracting embeddings"):
-        # try:
+    embeddings, ids = [], []
+    for path in tqdm(csv_paths, desc="Extracting GPT embeddings"):
         x = load_patient_signal(path, feats)
-        if len(x) < 2: continue
-        x_tensor = torch.tensor(x[:180]).unsqueeze(0).to(device)
+        if len(x) < window_len: continue
+        x_tensor = torch.tensor(x[:window_len]).unsqueeze(0).to(device)
         with torch.no_grad():
             z = model.extract_last_step_feature(x_tensor)
         embeddings.append(z.squeeze(0).cpu().numpy())
         ids.append(os.path.basename(path).replace(".csv", ""))
-        # except Exception as e:
-        #     print(f"Error processing {path}: {e}")
     return np.stack(embeddings), ids
+
+def extract_stat_features(model, csv_paths, feats, window_len=180):
+    stats, ids = [], []
+    for path in tqdm(csv_paths, desc="Extracting mean+std features"):
+        x = load_patient_signal(path, feats)
+        # if len(x) < window_len: continue
+        # x_window = x[:window_len]
+        x_window = x
+        mean_vec = np.mean(x_window, axis=0)
+        std_vec = np.std(x_window, axis=0)
+
+        stats.append(np.concatenate([mean_vec, std_vec]))
+        ids.append(os.path.basename(path).replace(".csv", ""))
+    return np.stack(stats), ids
 
 # --- Main ---
 if __name__ == '__main__':
     # --- Load model ---
-    model = GPTFeatureModel(input_dim=len(PPG_feature_bases)).to(device)
+    model = GPTFeatureModel(input_dim=len(PPG_feature_bases), max_seq_len=180).to(device)
     model.load_state_dict(torch.load("gpt_feature_model.pt"))
     model = GPTFeatureExtractor(model).to(device)
     model.eval()
@@ -112,7 +127,7 @@ if __name__ == '__main__':
     patient_ids = [os.path.basename(p).replace(".csv", "") for p in csv_paths]
 
     # --- Extract embeddings ---
-    X, ids = extract_patient_embeddings_last_step(model, csv_paths, PPG_feature_bases)
+    X, ids = extract_stat_features(model, csv_paths, PPG_feature_bases) # extract_gpt_embeddings(model, csv_paths, PPG_feature_bases)
     features_df = pd.DataFrame(X, index=ids, columns=[f"feat_{i}" for i in range(X.shape[1])])
     features_df.index = features_df.index.str.replace(r'^.*?-', '', regex=True)  # remove prefix like '01NVa-'
     features_df.index = features_df.index.str.replace(r'_.*$', '', regex=True)  # remove suffix like '_20s'
@@ -134,8 +149,10 @@ if __name__ == '__main__':
         remove_ids = ['003-1011', '003-1016', '003-1017', '003-1214', '003-1219', '003-1239']
         dataset = dataset[~dataset.index.isin(remove_ids)]
 
+    dataset.fillna(0., inplace=True)
     # --- Prepare final data ---
     X = dataset.filter(like="feat_").values
+
     y = dataset[label_name].values
 
     from sklearn.model_selection import RepeatedStratifiedKFold
@@ -162,7 +179,7 @@ if __name__ == '__main__':
             X_train, X_test = X[train_idx], X[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
 
-            clf = RandomForestClassifier(n_estimators=1000, random_state=42)
+            clf = RandomForestClassifier(random_state=42)
             clf.fit(X_train, y_train)
 
             y_pred = clf.predict(X_test)

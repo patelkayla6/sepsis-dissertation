@@ -284,7 +284,7 @@ if __name__ == '__main__':
     train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, pin_memory=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=128, shuffle=False, pin_memory=True, num_workers=4)
 
-    model = GPTFeatureModel(input_dim=len(PPG_feature_bases), max_seq_len=48*180).to(device)
+    model = GPTFeatureModel(input_dim=len(PPG_feature_bases), max_seq_len=180).to(device)
     train_cpc(model, train_loader, val_loader, epochs=3)
     torch.save(model.state_dict(), "gpt_feature_model.pt")
 
