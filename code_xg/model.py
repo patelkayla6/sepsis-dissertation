@@ -9,6 +9,7 @@ import numpy as np
 from x_transformers import TransformerWrapper, AutoregressiveWrapper, Decoder
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import torch.nn.functional as F
 
 # --- Device ---
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -95,9 +96,19 @@ class HDF5HRVDataset(Dataset):
         y = self.h5[pid][i+1][-1]
         return torch.tensor(x), torch.tensor(y)
 
+class AverageMeter:
+    def __init__(self): self.reset()
+    def reset(self): self.val = 0; self.sum = 0; self.count = 0; self.avg = 0
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+
 # --- Model ---
 class GPTFeatureModel(nn.Module):
-    def __init__(self, input_dim, hidden_dim=128, proj_dim=128, heads=8, depth=4, max_seq_len=360):
+    def __init__(self, input_dim, hidden_dim=128, proj_dim=128, heads=8, depth=4, max_seq_len=48*180):
         super().__init__()
         self.input_proj = nn.Linear(input_dim, hidden_dim)
         self.pos_encoding = PositionalEncoding(hidden_dim, max_len=max_seq_len)
@@ -126,6 +137,14 @@ class GPTFeatureModel(nn.Module):
         z = self.to_latent(h)
         y_pred = self.to_recon(z)
         return y_pred, x_target
+
+    # def extract_last_step_feature(self, x):
+    #     """
+    #     Returns:
+    #         z_last: [B, proj_dim] — feature at the last time step
+    #     """
+    #     z = self.forward(x)
+    #     return z[:, -1, :]
 
 # --- Training ---
 def train_autoregressive(model, train_loader, val_loader, epochs=100):
@@ -168,6 +187,88 @@ def train_autoregressive(model, train_loader, val_loader, epochs=100):
     plt.savefig("loss_curve.png")
     plt.close()
 
+
+# --- CPC Model ---
+class CPCModel(nn.Module):
+    def __init__(self, input_dim, hidden_dim=128, proj_dim=128, heads=8, depth=4, max_seq_len=360, pred_steps=1):
+        super().__init__()
+        self.input_proj = nn.Linear(input_dim, hidden_dim)
+        self.pos_encoding = PositionalEncoding(hidden_dim, max_len=180*24)
+        self.encoder = Decoder(dim=hidden_dim, depth=depth, heads=heads)
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.projector = nn.Linear(hidden_dim, proj_dim)
+        self.predictors = nn.ModuleList([nn.Linear(proj_dim, proj_dim) for _ in range(pred_steps)])
+        self.pred_steps = pred_steps
+
+    def forward(self, x):
+        B, T, D = x.shape
+        h = self.input_proj(x.reshape(-1, D)).reshape(B, T, -1)
+        h = self.pos_encoding(h)
+        z = self.encoder(h)
+        z = self.norm(z)
+        z = self.projector(z)
+        context = z[:, :-self.pred_steps]
+        preds = [self.predictors[k](context) for k in range(self.pred_steps)]
+        targets = [z[:, k+1:T-self.pred_steps+k+1] for k in range(self.pred_steps)]
+        return preds, targets
+
+# --- CPC Loss ---
+def cpc_loss(preds, targets, temperature=0.07):
+    B, T, D = preds.shape
+    preds = preds.reshape(B*T, D)
+    targets = targets.reshape(B*T, D)
+    preds = F.normalize(preds, dim=-1)
+    targets = F.normalize(targets, dim=-1)
+    logits = torch.matmul(preds, targets.T) / temperature
+    labels = torch.arange(B*T, device=preds.device)
+    loss = nn.CrossEntropyLoss()(logits, labels)
+    return loss
+
+# --- Training ---
+def train_cpc(model, train_loader, val_loader, epochs=100):
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    train_losses, val_losses = [], []
+
+    for epoch in range(epochs):
+        model.train()
+        train_meter = AverageMeter()
+        with tqdm(train_loader, desc=f"Epoch {epoch + 1} [Train]") as pbar:
+            for x, _ in pbar:
+                x = x.to(device)
+                optimizer.zero_grad()
+                preds, targets = model(x)
+                loss = cpc_loss(preds, targets) + F.mse_loss(preds, targets)
+                loss.backward()
+                optimizer.step()
+                train_meter.update(loss.item(), n=x.size(0))
+                pbar.set_postfix(loss=train_meter.avg)
+
+        model.eval()
+        val_meter = AverageMeter()
+        with torch.no_grad():
+            with tqdm(val_loader, desc=f"Epoch {epoch + 1} [Val]") as pbar:
+                for x, _ in pbar:
+                    x = x.to(device)
+                    preds, targets = model(x)
+                    loss = cpc_loss(preds, targets)
+                    val_meter.update(loss.item(), n=x.size(0))
+                    pbar.set_postfix(val_loss=val_meter.avg)
+
+        train_losses.append(train_meter.avg)
+        val_losses.append(val_meter.avg)
+        print(f"Epoch {epoch+1}: Train Loss={train_losses[-1]:.4f}, Val Loss={val_losses[-1]:.4f}")
+
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Val Loss')
+    plt.legend()
+    plt.title("Training vs Validation Loss")
+    plt.xlabel("Epoch"); plt.ylabel("Loss")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig("cpc_loss_curve.png")
+    plt.close()
+
+
 # --- Main ---
 if __name__ == '__main__':
     h5_path = 'ppg_windows.h5'
@@ -180,10 +281,10 @@ if __name__ == '__main__':
     train_dataset = HDF5HRVDataset(h5_path, mode='train')
     val_dataset = HDF5HRVDataset(h5_path, mode='val')
 
-    train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True, pin_memory=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=512, shuffle=False, pin_memory=True, num_workers=4)
+    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, pin_memory=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=128, shuffle=False, pin_memory=True, num_workers=4)
 
-    model = GPTFeatureModel(input_dim=len(PPG_feature_bases), max_seq_len=window_size).to(device)
-    train_autoregressive(model, train_loader, val_loader, epochs=100)
+    model = GPTFeatureModel(input_dim=len(PPG_feature_bases), max_seq_len=48*180).to(device)
+    train_cpc(model, train_loader, val_loader, epochs=3)
     torch.save(model.state_dict(), "gpt_feature_model.pt")
 

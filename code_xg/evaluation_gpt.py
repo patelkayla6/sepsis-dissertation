@@ -45,27 +45,41 @@ def load_patient_signal(file_path, feats):
         df[col] = df[col].fillna(0.0)
     return df.to_numpy(dtype=np.float32)
 
+from model import GPTFeatureModel
+
 # --- Model ---
-class GPTFeatureModel(nn.Module):
-    def __init__(self, input_dim, hidden_dim=128, proj_dim=128, heads=8, depth=4, max_seq_len=360):
+class GPTFeatureExtractor(nn.Module):
+    def __init__(self, pretrained_model: GPTFeatureModel):
         super().__init__()
-        self.input_proj = nn.Linear(input_dim, hidden_dim)
-        self.gpt = Decoder(dim=hidden_dim, depth=depth, heads=heads)
-        self.norm = nn.LayerNorm(hidden_dim)
-        self.to_latent = nn.Linear(hidden_dim, proj_dim)
-        self.to_recon = nn.Linear(proj_dim, input_dim)
+        self.input_proj = pretrained_model.input_proj
+        self.pos_encoding = pretrained_model.pos_encoding
+        self.gpt = pretrained_model.gpt
+        self.norm = pretrained_model.norm
+        self.to_latent = pretrained_model.to_latent
 
     def forward(self, x):
+        """
+        Args:
+            x: [B, T, D] — full sequence
+        Returns:
+            z: [B, T, proj_dim] — latent representation at each step
+        """
         B, T, D = x.shape
-        h = self.input_proj(x.reshape(-1, D)).reshape(B, T, -1)
+        h = self.input_proj(x.view(-1, D)).view(B, T, -1)
+        h = self.pos_encoding(h)
         h = self.gpt(h)
         h = self.norm(h)
         z = self.to_latent(h)
         return z
 
     def extract_last_step_feature(self, x):
+        """
+        Returns:
+            z_last: [B, proj_dim] — feature at the last time step
+        """
         z = self.forward(x)
-        return z[:, -1, :]  # [B, proj_dim]
+        return z[:, -1, :]
+
 
 # --- Embedding Extraction ---
 def extract_patient_embeddings_last_step(model, csv_paths, feats):
@@ -73,16 +87,16 @@ def extract_patient_embeddings_last_step(model, csv_paths, feats):
     embeddings = []
     ids = []
     for path in tqdm(csv_paths, desc="Extracting embeddings"):
-        try:
-            x = load_patient_signal(path, feats)
-            if len(x) < 2: continue
-            x_tensor = torch.tensor(x).unsqueeze(0).to(device)
-            with torch.no_grad():
-                z = model.extract_last_step_feature(x_tensor)
-            embeddings.append(z.squeeze(0).cpu().numpy())
-            ids.append(os.path.basename(path).replace(".csv", ""))
-        except Exception as e:
-            print(f"Error processing {path}: {e}")
+        # try:
+        x = load_patient_signal(path, feats)
+        if len(x) < 2: continue
+        x_tensor = torch.tensor(x[:180]).unsqueeze(0).to(device)
+        with torch.no_grad():
+            z = model.extract_last_step_feature(x_tensor)
+        embeddings.append(z.squeeze(0).cpu().numpy())
+        ids.append(os.path.basename(path).replace(".csv", ""))
+        # except Exception as e:
+        #     print(f"Error processing {path}: {e}")
     return np.stack(embeddings), ids
 
 # --- Main ---
@@ -90,6 +104,7 @@ if __name__ == '__main__':
     # --- Load model ---
     model = GPTFeatureModel(input_dim=len(PPG_feature_bases)).to(device)
     model.load_state_dict(torch.load("gpt_feature_model.pt"))
+    model = GPTFeatureExtractor(model).to(device)
     model.eval()
 
     # --- Input data ---
@@ -126,39 +141,59 @@ if __name__ == '__main__':
     from sklearn.model_selection import RepeatedStratifiedKFold
     from sklearn.metrics import roc_auc_score, precision_score, recall_score, f1_score
     from sklearn.ensemble import RandomForestClassifier
+    from sklearn.model_selection import StratifiedKFold
 
-    cv = RepeatedStratifiedKFold(n_splits=10, n_repeats=10, random_state=42)
+    n_repeats = 10
+    n_splits = 10
+    random_state = 42
 
     aucs, accs, precisions, recalls, f1s = [], [], [], [], []
 
-    for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X, y), 1):
-        X_train, X_test = X[train_idx], X[test_idx]
-        y_train, y_test = y[train_idx], y[test_idx]
+    for repeat in range(n_repeats):
+        cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=repeat + random_state)
 
-        clf = RandomForestClassifier(n_estimators=100, random_state=42)
-        clf.fit(X_train, y_train)
-        y_pred = clf.predict(X_test)
-        y_prob = clf.predict_proba(X_test)[:, 1] if len(np.unique(y)) == 2 else None
+        y_true_all = []
+        y_pred_all = []
+        y_prob_all = []
 
-        # Metrics
-        accs.append(accuracy_score(y_test, y_pred))
-        precisions.append(precision_score(y_test, y_pred, zero_division=0))
-        recalls.append(recall_score(y_test, y_pred, zero_division=0))
-        f1s.append(f1_score(y_test, y_pred, zero_division=0))
-        if y_prob is not None:
-            aucs.append(roc_auc_score(y_test, y_prob))
+        acc_fold, prec_fold, rec_fold, f1_fold = [], [], [], []
 
-        if fold_idx % 5 == 0:
-            print(f"Completed {fold_idx} folds")
+        for train_idx, test_idx in cv.split(X, y):
+            X_train, X_test = X[train_idx], X[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
+
+            clf = RandomForestClassifier(n_estimators=1000, random_state=42)
+            clf.fit(X_train, y_train)
+
+            y_pred = clf.predict(X_test)
+            y_prob = clf.predict_proba(X_test)[:, 1]
+
+            y_true_all.extend(y_test)
+            y_pred_all.extend(y_pred)
+            y_prob_all.extend(y_prob)
+
+            acc_fold.append(accuracy_score(y_test, y_pred))
+            prec_fold.append(precision_score(y_test, y_pred, zero_division=0))
+            rec_fold.append(recall_score(y_test, y_pred, zero_division=0))
+            f1_fold.append(f1_score(y_test, y_pred, zero_division=0))
+
+        # Compute AUROC once per repeat (full set)
+        auc = roc_auc_score(y_true_all, y_prob_all)
+        aucs.append(auc)
+        accs.append(np.mean(acc_fold))
+        precisions.append(np.mean(prec_fold))
+        recalls.append(np.mean(rec_fold))
+        f1s.append(np.mean(f1_fold))
+
+        print(f"Repeat {repeat + 1}/{n_repeats} AUROC: {auc:.4f}")
 
     # Summary
-    print(f"\n=== Repeated 5-Fold CV ({cv.get_n_splits()} folds) ===")
+    print(f"\n=== Repeated {n_splits}-Fold CV (mean over {n_repeats} repeats) ===")
     print(f"Accuracy: {np.mean(accs):.4f} ± {np.std(accs):.4f}")
     print(f"Precision: {np.mean(precisions):.4f} ± {np.std(precisions):.4f}")
     print(f"Recall: {np.mean(recalls):.4f} ± {np.std(recalls):.4f}")
     print(f"F1 Score: {np.mean(f1s):.4f} ± {np.std(f1s):.4f}")
-    if aucs:
-        print(f"AUROC: {np.mean(aucs):.4f} ± {np.std(aucs):.4f}")
+    print(f"AUROC: {np.mean(aucs):.4f} ± {np.std(aucs):.4f}")
 
     from sklearn.manifold import TSNE
     import matplotlib.pyplot as plt
