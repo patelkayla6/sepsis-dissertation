@@ -250,7 +250,12 @@ class CPCModel(nn.Module):
         from x_transformers import Decoder
         self.input_proj = nn.Linear(input_dim, hidden_dim)
         self.pos_encoding = PositionalEncoding(hidden_dim, max_len=max_seq_len)
-        self.encoder = Decoder(dim=hidden_dim, depth=depth, heads=heads)
+        self.encoder = Decoder(
+            dim=hidden_dim,
+            depth=depth,
+            heads=heads,
+            rotary_xpos = True,               # <<— turn on RoPE
+        )
         self.norm = nn.LayerNorm(hidden_dim)
         self.projector = nn.Linear(hidden_dim, proj_dim)
         self.predictors = nn.ModuleList([nn.Linear(proj_dim, proj_dim) for _ in range(pred_steps)])
@@ -260,7 +265,7 @@ class CPCModel(nn.Module):
         # x: [B, T, D]
         B, T, D = x.shape
         h = self.input_proj(x.reshape(-1, D)).reshape(B, T, -1)
-        h = self.pos_encoding(h)
+        # h = self.pos_encoding(h)
         z = self.encoder(h)           # [B, T, H]
         z = self.norm(z)
         z = self.projector(z)         # [B, T, P]
