@@ -14,6 +14,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
+from x_transformers import Decoder
+
 import matplotlib.pyplot as plt
 
 # ---------------------------
@@ -37,7 +39,7 @@ PPG_FEATURE_BASES = ['HRV_MeanNN', 'HRV_SDNN', 'HRV_RMSSD', 'HRV_SDSD',
     'HRV_MFDFA_alpha1_Mean', 'HRV_MFDFA_alpha1_Max', 'HRV_MFDFA_alpha1_Delta',
     'HRV_MFDFA_alpha1_Asymmetry', 'HRV_MFDFA_alpha1_Fluctuation',
     'HRV_MFDFA_alpha1_Increment', 'HRV_ApEn', 'HRV_SampEn', 'HRV_ShanEn', 'HRV_FuzzyEn',
-    'HRV_CD', 'HRV_HFD', 'HRV_KFD', 'HRV_LZC'
+    'HRV_CD', 'HRV_HFD', 'HRV_KFD', 'HRV_LZC',
     'Tpi', 'Tpp', 'Tsys', 'Tdia', 'Tsp', 'Tdp', 'deltaT',
      'Tsw10', 'Tsw25', 'Tsw33', 'Tsw50', 'Tsw66', 'Tsw75', 'Tsw90',
      'Tdw10', 'Tdw25', 'Tdw33', 'Tdw50', 'Tdw66', 'Tdw75', 'Tdw90',
@@ -247,9 +249,8 @@ class CPCModel(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int = 128, proj_dim: int = 128,
                  heads: int = 8, depth: int = 4, max_seq_len: int = 360, pred_steps: int = 1):
         super().__init__()
-        from x_transformers import Decoder
         self.input_proj = nn.Linear(input_dim, hidden_dim)
-        self.pos_encoding = PositionalEncoding(hidden_dim, max_len=max_seq_len)
+        # self.pos_encoding = PositionalEncoding(hidden_dim, max_len=max_seq_len)
         self.encoder = Decoder(
             dim=hidden_dim,
             depth=depth,
@@ -265,7 +266,7 @@ class CPCModel(nn.Module):
         # x: [B, T, D]
         B, T, D = x.shape
         h = self.input_proj(x.reshape(-1, D)).reshape(B, T, -1)
-        # h = self.pos_encoding(h)
+        #h = self.pos_encoding(h)
         z = self.encoder(h)           # [B, T, H]
         z = self.norm(z)
         z = self.projector(z)         # [B, T, P]
@@ -324,8 +325,9 @@ def train_cpc(model, train_loader, val_loader, epochs=100, lr=1e-3, grad_clip=No
 
                 # merge CPC loss + MSE loss
                 loss_total = 0.0
+
                 for preds, targets in zip(preds_list, targets_list):
-                    loss_total += cpc_loss_from_lists(preds, targets) + F.mse_loss(preds, targets)
+                    loss_total += F.mse_loss(preds, targets)
 
                 loss_total.backward()
                 if grad_clip is not None:
@@ -346,7 +348,7 @@ def train_cpc(model, train_loader, val_loader, epochs=100, lr=1e-3, grad_clip=No
                     preds_list, targets_list = model(x)
                     loss_total = 0.0
                     for preds, targets in zip(preds_list, targets_list):
-                        loss_total += cpc_loss_from_lists(preds, targets) + F.mse_loss(preds, targets)
+                        loss_total += F.mse_loss(preds, targets)
 
                     val_sum += loss_total.item() * x.size(0)
                     val_count += x.size(0)
@@ -367,14 +369,14 @@ def train_cpc(model, train_loader, val_loader, epochs=100, lr=1e-3, grad_clip=No
 # ---------------------------
 if __name__ == "__main__":
     # --- Paths and basic config
-    DATA_DIR = "../data"
+    DATA_DIR = "../data/"
     PPG_DIR = os.path.join(DATA_DIR, "PPG")
     H5_PATH = "ppg_windows.h5"
 
     # --- Sliding window: 20-second samples → 1 hour window (example)
     # If each row is 20s summary, one hour = 180 samples.
     WINDOW_SIZE = int(60 * 60 / 20)  # 180
-    STEP = 1
+    STEP = 180
 
     # --- List CSVs
     csv_paths = sorted(glob.glob(os.path.join(PPG_DIR, "*.csv")))
@@ -435,7 +437,7 @@ if __name__ == "__main__":
     ).to(device)
 
     # --- Train
-    train_cpc(model, train_loader, val_loader, epochs=10, lr=1e-3)
+    train_cpc(model, train_loader, val_loader, epochs=100, lr=1e-3)
 
     # --- Save weights
     torch.save(model.state_dict(), "gpt_feature_model.pt")

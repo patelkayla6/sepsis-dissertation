@@ -24,7 +24,7 @@ from sklearn.model_selection import StratifiedKFold
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # --- Feature Bases ---
-PPG_feature_bases = ['HRV_MeanNN', 'HRV_SDNN', 'HRV_RMSSD', 'HRV_SDSD',
+PPG_FEATURE_BASES = ['HRV_MeanNN', 'HRV_SDNN', 'HRV_RMSSD', 'HRV_SDSD',
     'HRV_CVNN', 'HRV_CVSD', 'HRV_MedianNN',
     'HRV_MadNN', 'HRV_MCVNN', 'HRV_IQRNN', 'HRV_SDRMSSD', 'HRV_Prc20NN', 'HRV_Prc80NN',
     'HRV_pNN50', 'HRV_pNN20', 'HRV_MinNN', 'HRV_MaxNN', 'HRV_HTI', 'HRV_TINN', 'HRV_HF',
@@ -43,6 +43,8 @@ PPG_feature_bases = ['HRV_MeanNN', 'HRV_SDNN', 'HRV_RMSSD', 'HRV_SDSD',
      'Tpw10', 'Tpw25', 'Tpw33', 'Tpw50', 'Tpw66', 'Tpw75', 'Tpw90',
      'Asp', 'Adn', 'Adp', 'Aoff', 'AUCpi', 'AUCsys', 'AUCdia', ]
 
+D_INPUT = len(PPG_FEATURE_BASES)
+
 # --- Data Loading & Preprocessing ---
 def load_patient_signal(file_path, feats):
     """
@@ -59,53 +61,67 @@ def load_patient_signal(file_path, feats):
     return df.to_numpy(dtype=np.float32)
 
 
-from model import GPTFeatureModel
+from model import CPCModel
 
 # --- Model ---
-class GPTFeatureExtractor(nn.Module):
-    def __init__(self, pretrained_model: GPTFeatureModel):
+class CPCFeatureExtractor(nn.Module):
+    """
+    Wraps a CPCModel and exposes encoded/projected features.
+    Works whether CPCModel had absolute PE or RoPE (we auto-detect pos_encoding).
+    """
+    def __init__(self, cpc: CPCModel):
         super().__init__()
-        self.input_proj = pretrained_model.input_proj
-        self.pos_encoding = pretrained_model.pos_encoding
-        self.gpt = pretrained_model.gpt
-        self.norm = pretrained_model.norm
-        self.to_latent = pretrained_model.to_latent
+        self.cpc = cpc
+        self.has_abs_pos = hasattr(cpc, 'pos_encoding')  # compatibility
 
-    def forward(self, x):
+    @torch.no_grad()
+    def forward(self, x: torch.Tensor):
         """
-        Args:
-            x: [B, T, D] — full sequence
-        Returns:
-            z: [B, T, proj_dim] — latent representation at each step
+        x: [B, T, D]
+        returns: z: [B, T, P]  (projected per-timestep features)
         """
         B, T, D = x.shape
-        h = self.input_proj(x.view(-1, D)).view(B, T, -1)
-        h = self.pos_encoding(h)
-        h = self.gpt(h)
-        h = self.norm(h)
-        z = self.to_latent(h)
+        h = self.cpc.input_proj(x.view(-1, D)).view(B, T, -1)
+        if self.has_abs_pos:
+            h = self.cpc.pos_encoding(h)  # RoPE models won't have this attribute
+
+        # RoPE is applied inside the decoder attention of self.cpc.encoder
+        h = self.cpc.encoder(h)          # [B, T, H]
+        h = self.cpc.norm(h)
+        z = self.cpc.projector(h)        # [B, T, P]
         return z
 
-    def extract_last_step_feature(self, x):
+    @torch.no_grad()
+    def last_step(self, x: torch.Tensor):
+        """[B, P] feature from the last timestep."""
+        return self.forward(x)[:, -1, :]
+
+    @torch.no_grad()
+    def mean_pool(self, x: torch.Tensor, mask: torch.Tensor | None = None):
         """
-        Returns:
-            z_last: [B, proj_dim] — feature at the last time step
+        Mean-pool over time. If mask is provided (1=valid, 0=pad), uses masked mean.
+        returns: [B, P]
         """
-        z = self.forward(x)
-        return z[:, -1, :]
+        z = self.forward(x)  # [B, T, P]
+        if mask is None:
+            return z.mean(dim=1)
+        denom = mask.sum(dim=1).clamp(min=1).unsqueeze(-1)
+        return (z * mask.unsqueeze(-1)).sum(dim=1) / denom
 
 
 # --- Embedding Extraction ---
 def extract_gpt_embeddings(model, csv_paths, feats, window_len=180):
+    # model is CPCFeatureExtractor now
     model.eval()
     embeddings, ids = [], []
-    for path in tqdm(csv_paths, desc="Extracting GPT embeddings"):
+    for path in tqdm(csv_paths, desc="Extracting CPC embeddings"):
         x = load_patient_signal(path, feats)
-        if len(x) < window_len: continue
-        x_tensor = torch.tensor(x[:window_len]).unsqueeze(0).to(device)
+        if len(x) < window_len:
+            continue
+        x_tensor = torch.tensor(x[:window_len]).unsqueeze(0).to(device)  # [1, T, D]
         with torch.no_grad():
-            z = model.extract_last_step_feature(x_tensor)
-        embeddings.append(z.squeeze(0).cpu().numpy())
+            z_last = model.last_step(x_tensor)  # [1, P]
+        embeddings.append(z_last.squeeze(0).cpu().numpy())
         ids.append(os.path.basename(path).replace(".csv", ""))
     return np.stack(embeddings), ids
 
@@ -150,9 +166,18 @@ def extract_stat_features(model, csv_paths, feats, window_len=180):
 # --- Main ---
 if __name__ == '__main__':
     # --- Load model ---
-    model = GPTFeatureModel(input_dim=len(PPG_feature_bases), max_seq_len=180).to(device)
-    # model.load_state_dict(torch.load("gpt_feature_model.pt"))
-    model = GPTFeatureExtractor(model).to(device)
+    WINDOW_SIZE = int(60 * 60 / 20)  # 180
+
+    model = CPCFeatureExtractor(
+        input_dim=D_INPUT,
+        hidden_dim=128,
+        proj_dim=128,
+        heads=8,
+        depth=4,
+        max_seq_len=WINDOW_SIZE,
+        pred_steps=1
+    ).to(device)
+    model.load_state_dict(torch.load("cpc_best.pt"))
     model.eval()
 
     # --- Input data ---
@@ -160,7 +185,8 @@ if __name__ == '__main__':
     patient_ids = [os.path.basename(p).replace(".csv", "") for p in csv_paths]
 
     # --- Extract embeddings ---
-    X, ids = extract_stat_features(model, csv_paths, PPG_feature_bases) # extract_gpt_embeddings(model, csv_paths, PPG_feature_bases)
+    X, ids = extract_stat_features(model, csv_paths, PPG_FEATURE_BASES)
+    #X, ids = extract_gpt_embeddings(model, csv_paths, PPG_FEATURE_BASES)
     features_df = pd.DataFrame(X, index=ids, columns=[f"feat_{i}" for i in range(X.shape[1])])
     features_df.index = features_df.index.str.replace(r'^.*?-', '', regex=True)  # remove prefix like '01NVa-'
     features_df.index = features_df.index.str.replace(r'_.*$', '', regex=True)  # remove suffix like '_20s'
