@@ -48,7 +48,6 @@ PPG_FEATURE_BASES = ['HRV_MeanNN', 'HRV_SDNN', 'HRV_RMSSD', 'HRV_SDSD',
 
 D_INPUT = len(PPG_FEATURE_BASES)
 
-
 # ---------------------------
 # IO helpers
 # ---------------------------
@@ -259,7 +258,7 @@ class CPCModel(nn.Module):
         )
         self.norm = nn.LayerNorm(hidden_dim)
         self.projector = nn.Linear(hidden_dim, proj_dim)
-        self.predictors = nn.ModuleList([nn.Linear(proj_dim, proj_dim) for _ in range(pred_steps)])
+        self.pred_head = nn.Sequential(nn.Linear(proj_dim, proj_dim), nn.ReLU(), nn.Linear(proj_dim, input_dim))  # change output dim
         self.pred_steps = pred_steps
 
     def forward(self, x: torch.Tensor):
@@ -272,12 +271,10 @@ class CPCModel(nn.Module):
         z = self.projector(z)         # [B, T, P]
 
         # context excludes last pred_steps to allow predicting future positions
-        context = z[:, :-self.pred_steps, :]  # [B, T - K, P]
-        preds = []
-        targets = []
-        for k in range(self.pred_steps):
-            preds.append(self.predictors[k](context))           # [B, T-K, P]
-            targets.append(z[:, k+1: z.size(1)-self.pred_steps+k+1, :])  # aligned future slice
+        context = z[:, :-1, :]
+        preds = self.pred_head(context)  # [B, T-1, D]  ✅ matches target
+        targets = x[:, 1:, :].detach()
+
         return preds, targets
 
 
@@ -309,7 +306,9 @@ class AverageMeter:
 
 
 def train_cpc(model, train_loader, val_loader, epochs=100, lr=1e-3, grad_clip=None, ckpt_path="cpc_best.pt"):
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    from evaluation_wrapper import run_downstream_eval
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     best_val_loss = float("inf")
 
     for epoch in range(1, epochs + 1):
@@ -324,10 +323,9 @@ def train_cpc(model, train_loader, val_loader, epochs=100, lr=1e-3, grad_clip=No
                 preds_list, targets_list = model(x)
 
                 # merge CPC loss + MSE loss
-                loss_total = 0.0
+                # loss_total = 0.0
 
-                for preds, targets in zip(preds_list, targets_list):
-                    loss_total += F.mse_loss(preds, targets)
+                loss_total = F.mse_loss(preds_list, targets_list)
 
                 loss_total.backward()
                 if grad_clip is not None:
@@ -346,9 +344,7 @@ def train_cpc(model, train_loader, val_loader, epochs=100, lr=1e-3, grad_clip=No
                 for x, _ in pbar:
                     x = x.to(device)
                     preds_list, targets_list = model(x)
-                    loss_total = 0.0
-                    for preds, targets in zip(preds_list, targets_list):
-                        loss_total += F.mse_loss(preds, targets)
+                    loss_total = F.mse_loss(preds_list, targets_list)
 
                     val_sum += loss_total.item() * x.size(0)
                     val_count += x.size(0)
@@ -362,21 +358,21 @@ def train_cpc(model, train_loader, val_loader, epochs=100, lr=1e-3, grad_clip=No
             best_val_loss = avg_val_loss
             torch.save(model.state_dict(), ckpt_path)
             print(f"  ✅ New best model saved at {ckpt_path} (Val Loss={best_val_loss:.4f})")
-
-
+            downstream_summary = run_downstream_eval(quick=False)
+            print(downstream_summary)
 # ---------------------------
 # Main
 # ---------------------------
 if __name__ == "__main__":
     # --- Paths and basic config
-    DATA_DIR = "../data/"
-    PPG_DIR = os.path.join(DATA_DIR, "PPG")
+    DATA_DIR = "../code_xg/preprocess_MIMIC-III/"
+    PPG_DIR = os.path.join(DATA_DIR, "ppg_features_by_icu_v2")
     H5_PATH = "ppg_windows.h5"
 
     # --- Sliding window: 20-second samples → 1 hour window (example)
     # If each row is 20s summary, one hour = 180 samples.
     WINDOW_SIZE = int(60 * 60 / 20)  # 180
-    STEP = 180
+    STEP = 90
 
     # --- List CSVs
     csv_paths = sorted(glob.glob(os.path.join(PPG_DIR, "*.csv")))
@@ -428,12 +424,12 @@ if __name__ == "__main__":
     # --- Model
     model = CPCModel(
         input_dim=D_INPUT,
-        hidden_dim=128,
+        hidden_dim=256,
         proj_dim=128,
         heads=8,
         depth=4,
         max_seq_len=WINDOW_SIZE,
-        pred_steps=1
+        pred_steps=179
     ).to(device)
 
     # --- Train

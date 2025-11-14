@@ -15,12 +15,13 @@ from sklearn.metrics import (
     roc_auc_score, average_precision_score, roc_curve,
     confusion_matrix, f1_score, recall_score
 )
+import importlib
+CPCModel = importlib.import_module('model').CPCModel  # ← import here
 
 # ---------------------------------------------------------------------
 # Import your trained CPC backbone (RoPE-enabled) from another module
 # ---------------------------------------------------------------------
 # Change this to the correct module path if needed.
-from model import CPCModel
 
 # ---------------------------------------------------------------------
 # Device
@@ -74,7 +75,7 @@ class CPCFeatureExtractor(nn.Module):
         h = self.cpc.encoder(h)          # [B, T, H]
         #h = self.cpc.norm(h)
         #z = self.cpc.projector(h)        # [B, T, P]
-        return h #z
+        return h
 
     @torch.no_grad()
     def last_step(self, x: torch.Tensor):
@@ -316,17 +317,19 @@ if __name__ == '__main__':
     # --------------------------------------------------------------
     # Config
     # --------------------------------------------------------------
-    WINDOW_SIZE = int(60 * 60 / 20 * 0.5)   # 180 samples if features are every 20s over 1 hour
+    from model import CPCModel
+
+    WINDOW_SIZE = int(60 * 60 / 20)   # 180 samples if features are every 20s over 1 hour
     D_INPUT = len(PPG_FEATURE_BASES)
-    USE_STREAMING_FULL_STATS = True  # <— turn streaming on/off
-    FEAT_MODE = 'stats'  # keep 'stats' for full-recording stats path
+    USE_STREAMING_FULL_STATS = False # <— turn streaming on/off
+    FEAT_MODE = 'cpc_mean'  # keep 'stats' for full-recording stats path
 
     # --------------------------------------------------------------
     # Load CPC backbone + weights, then wrap as feature extractor
     # --------------------------------------------------------------
     cpc = CPCModel(
         input_dim=D_INPUT,
-        hidden_dim=128,
+        hidden_dim=256,
         proj_dim=128,
         heads=8,
         depth=4,
@@ -334,8 +337,8 @@ if __name__ == '__main__':
         pred_steps=1
     ).to(device)
 
-    # ckpt = torch.load("cpc_best.pt", map_location=device)
-    # cpc.load_state_dict(ckpt, strict=True)
+    ckpt = torch.load("cpc_best.pt", map_location=device)
+    cpc.load_state_dict(ckpt, strict=True)
     feature_model = CPCFeatureExtractor(cpc).to(device).eval()
 
     # --------------------------------------------------------------
@@ -403,8 +406,7 @@ if __name__ == '__main__':
     # --------------------------------------------------------------
     # Repeated Stratified K-Fold with RF + train-derived threshold
     # --------------------------------------------------------------
-    n_repeats = 20
-    n_splits = 10
+    n_repeats, n_splits = 20, 10
 
     aucs, auprcs, accs, sens_list, spec_list, f1s = [], [], [], [], [], []
 
