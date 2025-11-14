@@ -324,10 +324,10 @@ def main():
     print(f"\nLabel: {label_name}")
 
     classifiers = {
-        #'Logistic_Regression': LogisticRegression(max_iter=1000, random_state=42),
+        'Logistic_Regression': LogisticRegression(max_iter=1000, random_state=42),
         # 'SVM_(RBF_Kernel)': SVC(kernel='rbf', probability=True, random_state=42),
         'Random_Forest': RandomForestClassifier(random_state=42),
-        #'XGBoost': XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
+        'XGBoost': XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
     }
     # classifiers = {
     #     'XGBoost': XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
@@ -339,7 +339,7 @@ def main():
 
     auroc_scores, auprc_scores = {}, {}
 
-    feature_list = PPG_feature_names # + ECG_feature_names + normal_feature_names
+    feature_list = PPG_feature_names + ECG_feature_names + normal_feature_names
     print('feature list', feature_list)
     print('normal feature name', normal_feature_names)
     print('ppg feature name', PPG_feature_names)
