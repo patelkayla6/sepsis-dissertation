@@ -5,6 +5,8 @@ import pandas as pd
 import wfdb
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 from preprocessing_utils import flat_sqi
 from ppg_feature        import PPG_feature
@@ -23,8 +25,8 @@ os.makedirs(OUT_DIR, exist_ok=True)
 # ─── LOAD KEEPERS & GROUP BY ICU ──────────────────────────────────────────
 ov_df = pd.read_csv(KEEPERS_CSV)
 # ensure rec_start and rec_end are datetimes
-ov_df['rec_start'] = pd.to_datetime(ov_df['rec_start'], format='%Y-%m-%d %H:%M:%S')
-ov_df['rec_end']   = pd.to_datetime(ov_df['rec_end'],   format='%Y-%m-%d %H:%M:%S')
+ov_df['rec_start'] = pd.to_datetime(ov_df['rec_start'], format='%Y-%m-%d %H:%M:%S.%f')
+ov_df['rec_end']   = pd.to_datetime(ov_df['rec_end'], format='%Y-%m-%d %H:%M:%S.%f')
 icu_groups = ov_df.groupby('icustay_id')['record_rel'].apply(list).to_dict()
 
 # ─── LOAD SEPSIS3 DF & BUILD ICU-LEVEL ZERO POINTS ────────────────────────
@@ -46,7 +48,7 @@ rec_start_series = ov_df.set_index('record_rel')['rec_start']
 rec_start_ms_map = (rec_start_series.astype('int64') // 10**6).to_dict()
 
 # ─── EXTRACT & RESAMPLE ONE RECORD ────────────────────────────────────────
-def load_and_resample_ppg(record_rel, start_ms):
+def load_and_resample_ppg_pandas(record_rel, start_ms):
     rec = wfdb.rdrecord(os.path.join(WFDB_PATH, record_rel))
     available = [ch for ch in PPG_CHANNELS if ch in rec.sig_name]
     if not available:
@@ -71,6 +73,40 @@ def load_and_resample_ppg(record_rel, start_ms):
     df_ppg['TIMESTAMP_MS'] = df_ppg['TIMESTAMP'].astype('int64') // 10**6
     return df_ppg[['TIMESTAMP_MS', 'ppg']]
 
+
+def load_and_resample_ppg(record_rel, start_ms):
+    # --- read only PPG channel ---
+    rec_path = os.path.join(WFDB_PATH, record_rel)
+    rec = wfdb.rdrecord(rec_path)
+
+    # choose first available PPG channel
+    available = [i for i, name in enumerate(rec.sig_name)
+                 if any(ppg in name.upper() for ppg in PPG_CHANNELS)]
+    if not available:
+        raise ValueError(f"No PPG channel in {record_rel}")
+
+    idx = available[0]
+    sig = rec.p_signal[:, idx]
+    fs = rec.fs
+
+    # --- construct original absolute timestamps ---
+    orig_time_ms = start_ms + np.arange(len(sig)) * (1000.0 / fs)
+
+    # --- construct new regular timestamps (10 ms grid) ---
+    # exact same grid as pandas resample('10ms')
+    new_time_ms = np.arange(orig_time_ms[0],
+                            orig_time_ms[-1] + SAMPLING_MS,
+                            SAMPLING_MS)
+
+    # --- interpolation (equivalent to pandas mean+interpolate for regularly spaced data) ---
+    new_ppg = np.interp(new_time_ms, orig_time_ms, sig)
+
+    # --- return in the same DataFrame structure as before ---
+    return pd.DataFrame({
+        'TIMESTAMP_MS': new_time_ms.astype(np.int64),
+        'ppg': new_ppg
+    })
+
 # ─── PROCESS ONE ICU STAY ────────────────────────────────────────────────
 def process_one_icu(icu_id, record_list):
     out_path = os.path.join(OUT_DIR, f'ICU_{icu_id}_ppg_features.csv')
@@ -81,6 +117,8 @@ def process_one_icu(icu_id, record_list):
     feats = []
 
     for rec_rel in record_list:
+        # if rec_rel != "p09/p091149/p091149-2182-03-27-16-48":
+        #     continue
         start_ms = rec_start_ms_map.get(rec_rel)
         if start_ms is None:
             print(f"[ICU {icu_id}] no rec_start for {rec_rel}, skipping")
@@ -95,7 +133,7 @@ def process_one_icu(icu_id, record_list):
             continue
 
         # align so ICU admission → 0
-        df_ppg['TIMESTAMP_MS'] -= zero_ms
+        df_ppg['TIMESTAMP_MS'] -= zero_ms #TODO: I need to check out this!!!
         df_ppg['TIMESTAMP']     = pd.to_datetime(df_ppg['TIMESTAMP_MS'], unit='ms')
 
         # segment valid windows
@@ -140,23 +178,42 @@ if __name__ == '__main__':
     completed = 0
 
     with ProcessPoolExecutor(max_workers=4) as executor:
-        futures = {
-            executor.submit(process_one_icu, icu, recs): icu
-            for icu, recs in icu_groups.items()
-        }
 
+        futures = {}
+
+        for icu, recs in icu_groups.items():
+
+            # --- SKIP RULES BEFORE SUBMIT ---
+            # 1. skip based on ICU id
+            if int(icu) < 247311:
+                print(f"Skipping ICU {icu} (< 247311)")
+                continue
+
+            # 2. skip if output file already exists
+            out_path = os.path.join(OUT_DIR, f'ICU_{icu}_ppg_features.csv')
+            if os.path.exists(out_path):
+                print(f"Skipping ICU {icu}: already processed")
+                continue
+
+            # otherwise submit job
+            futures[executor.submit(process_one_icu, icu, recs)] = icu
+
+        # --- COLLECT RESULTS ---
         for fut in as_completed(futures):
-            completed += 1
             icu_id = futures[fut]
+            completed += 1
+
             try:
                 icu_id, df_feats = fut.result()
-                print(f"Processed {completed}/{total} ICU stays (ICU {icu_id})")
+                print(f"Processed {completed}/{total} (ICU {icu_id})")
 
                 if df_feats is not None:
                     out_path = os.path.join(OUT_DIR, f'ICU_{icu_id}_ppg_features.csv')
                     df_feats.to_csv(out_path, index=False)
                     print(f"→ Saved ICU {icu_id}: {len(df_feats)} windows")
                 else:
-                    print(f"→ ICU {icu_id}: skipped")
+                    print(f"→ ICU {icu_id}: no valid windows")
+
             except Exception as e:
                 print(f"!!! ICU {icu_id} failed: {e}")
+

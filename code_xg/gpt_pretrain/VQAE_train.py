@@ -77,10 +77,58 @@ def load_first_row_features(pattern, max_files=None):
     X = np.clip(X, -1e6, 1e6)
     return X
 
+def load_all_rows_features(pattern, max_files=None, max_rows_per_file=None):
+    """
+    Load ALL rows from each CSV matching `pattern`.
+    Each row -> one feature vector (len(PPG_FEATURE_NAMES)).
+
+    Args:
+        pattern: glob pattern for csv files.
+        max_files: if not None, limit number of files.
+        max_rows_per_file: if not None, take at most this many rows per file.
+
+    Returns:
+        X: np.ndarray of shape (N_rows_total, len(PPG_FEATURE_NAMES))
+    """
+    files = sorted(glob.glob(pattern))
+    if max_files is not None:
+        files = files[:max_files]
+
+    vectors = []
+
+    for fp in tqdm(files, desc=f"Loading {pattern} (all rows)"):
+        try:
+            df = pd.read_csv(fp)
+        except Exception as e:
+            print(f"Skipping {fp} — read error: {e}")
+            continue
+
+        n_rows = len(df)
+        if max_rows_per_file is not None:
+            n_rows = min(n_rows, max_rows_per_file)
+
+        for i in range(n_rows):
+            row_vec = []
+            for col in PPG_FEATURE_NAMES:
+                if col in df.columns:
+                    try:
+                        row_vec.append(float(df[col].iloc[i]))
+                    except Exception:
+                        row_vec.append(0.0)
+                else:
+                    row_vec.append(0.0)
+            vectors.append(row_vec)
+
+    X = np.array(vectors, dtype=np.float32)
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    X = np.clip(X, -1e6, 1e6)
+    return X
+
 
 class PPGFeatureDataset(Dataset):
     def __init__(self, mi_pattern, max_per_site=None):
-        self.X = load_first_row_features(mi_pattern, max_files=max_per_site)
+        #self.X = load_first_row_features(mi_pattern, max_files=max_per_site)
+        self.X = load_all_rows_features(mi_pattern, max_files=max_per_site)
 
         # standardize
         self.mean = self.X.mean(axis=0, keepdims=True)

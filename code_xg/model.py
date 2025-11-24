@@ -23,7 +23,6 @@ import matplotlib.pyplot as plt
 # ---------------------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
 # ---------------------------
 # Feature bases (PPG)
 # ---------------------------
@@ -44,7 +43,7 @@ PPG_FEATURE_BASES = ['HRV_MeanNN', 'HRV_SDNN', 'HRV_RMSSD', 'HRV_SDSD',
      'Tsw10', 'Tsw25', 'Tsw33', 'Tsw50', 'Tsw66', 'Tsw75', 'Tsw90',
      'Tdw10', 'Tdw25', 'Tdw33', 'Tdw50', 'Tdw66', 'Tdw75', 'Tdw90',
      'Tpw10', 'Tpw25', 'Tpw33', 'Tpw50', 'Tpw66', 'Tpw75', 'Tpw90',
-     'Asp', 'Adn', 'Adp', 'Aoff', 'AUCpi', 'AUCsys', 'AUCdia', ]
+     'Asp', 'Adn', 'Adp', 'Aoff', 'AUCpi', 'AUCsys', 'AUCdia', 'SQI']
 
 D_INPUT = len(PPG_FEATURE_BASES)
 
