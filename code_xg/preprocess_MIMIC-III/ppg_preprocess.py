@@ -133,7 +133,7 @@ def process_one_icu(icu_id, record_list):
             continue
 
         # align so ICU admission → 0
-        df_ppg['TIMESTAMP_MS'] -= zero_ms #TODO: I need to check out this!!!
+        df_ppg['TIMESTAMP_MS'] -= zero_ms
         df_ppg['TIMESTAMP']     = pd.to_datetime(df_ppg['TIMESTAMP_MS'], unit='ms')
 
         # segment valid windows
@@ -177,7 +177,7 @@ if __name__ == '__main__':
     total = len(icu_groups)
     completed = 0
 
-    with ProcessPoolExecutor(max_workers=4) as executor:
+    with ProcessPoolExecutor(max_workers=8) as executor:
 
         futures = {}
 
@@ -185,7 +185,7 @@ if __name__ == '__main__':
 
             # --- SKIP RULES BEFORE SUBMIT ---
             # 1. skip based on ICU id
-            if int(icu) < 247311:
+            if int(icu) < 277000:
                 print(f"Skipping ICU {icu} (< 247311)")
                 continue
 
