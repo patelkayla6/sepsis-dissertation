@@ -70,7 +70,7 @@ def load_excel(time_window=20):
         if drop_cols:
             df = df.drop(columns=drop_cols)
         if binary_cols:
-            df[binary_cols] = df[binary_cols].applymap(lambda x: 'Y' if x == 1 else 'N')
+            df[binary_cols] = df[binary_cols].map(lambda x: 'Y' if x == 1 else 'N')
         if custom_processing:
             df = custom_processing(df)
         if aggregate_func:
