@@ -25,21 +25,40 @@ import shap
 warnings.filterwarnings("ignore")
 
 def prepare_data(preprocessor, use_pca, n_components, feature_names):
-    """Prepare training and testing data, apply PCA if requested, and extract feature names."""
+    """
+    Prepare training and testing data, apply PCA if requested, 
+    and extract feature names.
+    Now, if n_components < 1.0, it is treated as the fraction of 
+    variance to retain; if n_components >= 1, it is treated as 
+    the number of principal components.
+    """
     X_train, X_test, y_train, y_test = preprocessor.get_dataset()
     y_train, y_test = y_train.astype(int), y_test.astype(int)
 
     # Apply PCA if requested
-    if use_pca:
-        pca = PCA(n_components=n_components)
+    if use_pca and n_components is not None:
+        if n_components < 1.0:
+            # Interpret n_components as the fraction of variance to retain
+            pca = PCA(n_components=n_components, svd_solver='full')
+        else:
+            # Interpret n_components as the actual number of components
+            pca = PCA(n_components=int(n_components))
+        
         X_train = pca.fit_transform(X_train)
         X_test = pca.transform(X_test)
+
+        # Renaming features to principal components
         feature_names = [f'PC_{i+1}' for i in range(X_train.shape[1])]
     else:
+        # If not using PCA, just ensure we have a list of feature names
         if feature_names is None:
-            feature_names = X_train.columns.tolist() if isinstance(X_train, pd.DataFrame) else [f'Feature_{i}' for i in range(X_train.shape[1])]
+            if isinstance(X_train, pd.DataFrame):
+                feature_names = X_train.columns.tolist()
+            else:
+                feature_names = [f'Feature_{i}' for i in range(X_train.shape[1])]
 
     return X_train, X_test, y_train, y_test, feature_names
+
 
 def fit_and_calibrate_classifier(clf, X_train, y_train, calibrator):
     """Fit the classifier and calibrate probabilities if requested."""
@@ -130,12 +149,13 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
                                   use_RFE=False, RFE_feature_number=None):
     """Train and evaluate the classifier using specified cross-validation method."""
     print(f"\nClassifier: {clf_name} "
-          f"{f'with calibrator {calibrator}' if calibrator is not 'none' else ''} "
+          f"{f'with calibrator {calibrator}' if calibrator!='none' else ''} "
           f"{'with PCA' if use_pca else ''} "
           f"{'with RFE' if use_RFE else ''}{f' (selecting {RFE_feature_number} features)' if use_RFE else ''}")
 
     metrics_list = []
-    auroc_list = []
+    auroc_list, auprc_list = [], []
+    all_y_test, all_y_prob = [], []
     feature_names = None
 
     preprocessor = DataPreprocessor(label_name=label_name, missing_method='median', normalize=True,
@@ -164,6 +184,7 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
         metrics = compute_metrics(y_true_all, y_pred_all, y_prob_all)
         metrics_list.append(metrics)
         auroc_list.append(metrics['AUROC'])
+        auprc_list.append(metrics['AUPRC'])
 
         print("Metrics over Leave-One-Out Cross-Validation:")
         print(pd.Series(metrics))
@@ -183,6 +204,9 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
                 y_true_cv.append(y_test)
                 y_prob_cv.append(y_prob_cal)
                 y_pred_cv.append(y_pred)
+                # Also store them in the overall lists to later plot the ROC
+                all_y_test.append(y_test)
+                all_y_prob.append(y_prob_cal)
 
             y_true_cv = np.concatenate(y_true_cv)
             y_prob_cv = np.concatenate(y_prob_cv)
@@ -191,6 +215,7 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
             metrics = compute_metrics(y_true_cv, y_pred_cv, y_prob_cv)
             metrics_list.append(metrics)
             auroc_list.append(metrics['AUROC'])
+            auprc_list.append(metrics['AUPRC'])
 
         avg_metrics = pd.DataFrame(metrics_list).mean()
         std_metrics = pd.DataFrame(metrics_list).std()
@@ -202,21 +227,23 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
         print(f"Average Metrics over {num_CVs} {kfold}-fold cross-validations (mean±std):")
         print(combined_metrics)
 
-    return metrics_list, auroc_list, feature_names
+    return metrics_list, auroc_list, auprc_list, feature_names, np.concatenate(all_y_test), np.concatenate(all_y_prob)
 
-def perform_statistical_tests(auroc_scores, classifiers_list):
-    """Perform statistical tests between classifiers based on AUROC scores."""
-    auroc_df = pd.DataFrame(auroc_scores)
+def perform_statistical_tests(scores, classifiers_list, metric='AUROC'):
+    """Perform statistical tests between classifiers based on scores."""
+    df = pd.DataFrame(scores)
     p_values = pd.DataFrame(index=classifiers_list, columns=classifiers_list)
 
-    print("\nP-values between classifiers based on AUROC scores:")
+    print(f"\nP-values between classifiers based on {metric} scores:")
     for clf1, clf2 in combinations(classifiers_list, 2):
-        stat, p = wilcoxon(auroc_df[clf1], auroc_df[clf2])
+        stat, p = wilcoxon(df[clf1], df[clf2])
         p_values.loc[clf1, clf2] = p
         p_values.loc[clf2, clf1] = p
         print(f"P-value between {clf1} and {clf2}: {p:.4f}")
 
-    np.fill_diagonal(p_values.values, np.nan)
+    vals = p_values.to_numpy().copy()
+    np.fill_diagonal(vals, np.nan)
+    p_values[:] = vals
     print("\nP-values matrix:")
     print(p_values)
 
@@ -228,15 +255,23 @@ def train_classifier_on_full_data(clf_name, clf, preprocessor, use_pca=False, n_
     X_train, _, y_train, _ = preprocessor.get_dataset()
     y_train = y_train.astype(int)
 
-    if use_pca:
-        pca = PCA(n_components=n_components)
+    if use_pca and n_components is not None:
+        # Same fraction-of-variance vs. number-of-components logic
+        if n_components < 1.0:
+            pca = PCA(n_components=n_components, svd_solver='full')
+        else:
+            pca = PCA(n_components=int(n_components))
         X_train = pca.fit_transform(X_train)
         feature_names = [f'PC_{i+1}' for i in range(X_train.shape[1])]
     else:
-        feature_names = X_train.columns.tolist() if isinstance(X_train, pd.DataFrame) else [f'Feature_{i}' for i in range(X_train.shape[1])]
+        if isinstance(X_train, pd.DataFrame):
+            feature_names = X_train.columns.tolist()
+        else:
+            feature_names = [f'Feature_{i}' for i in range(X_train.shape[1])]
 
     clf.fit(X_train, y_train)
     return clf, feature_names, X_train, y_train
+
 
 def compute_feature_importance(clf_name, clf, preprocessor, use_pca=False, n_components=None):
     """Compute and display feature importance based on the trained classifier."""
@@ -290,38 +325,51 @@ def main():
     print(f"\nLabel: {label_name}")
 
     classifiers = {
-        'Logistic_Regression': LogisticRegression(max_iter=1000, random_state=42),
-        'SVM_(RBF_Kernel)': SVC(kernel='rbf', probability=True, random_state=42),
-        'Random_Forest': RandomForestClassifier(random_state=42),
-        'XGBoost': XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
+         'Logistic_Regression': LogisticRegression(max_iter=1000, random_state=42),
+         'SVM_(RBF_Kernel)': SVC(kernel='rbf', probability=True, random_state=42),
+         'Random_Forest': RandomForestClassifier(random_state=42),
+         'XGBoost': XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
     }
+    #classifiers = {
+    #    'XGBoost': XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
+    #}
 
     calibrators = ['none']
     use_pca = False
-    n_components = 64
+    n_components = 0.9
 
-    auroc_scores = {}
+    feature_sets = {
+        'Clinical':         normal_feature_names,
+        'PPG':              PPG_feature_names,
+        'ECG':              ECG_feature_names,
+        'PPG+ECG':          PPG_feature_names + ECG_feature_names,
+        'Clinical+PPG':     normal_feature_names + PPG_feature_names,
+        'Clinical+ECG':     normal_feature_names + ECG_feature_names,
+        'Clinical+PPG+ECG': normal_feature_names + PPG_feature_names + ECG_feature_names,
+    }
 
-    feature_list = normal_feature_names
-    # feature_list = []
-
+    auroc_scores, auprc_scores = {}, {}
 
     split_method = 'kfold'
     kfold = 10
     num_splits = 200
     use_RFE = False
-    RFE_feature_number=100
+    RFE_feature_number = 100
 
-    for calibrator in calibrators:
-        for clf_name, clf in classifiers.items():
-            combined_name = f"{clf_name}_{calibrator}{'_PCA' if use_pca else ''}"
-            metrics_list, auroc_list, feature_names = train_and_evaluate_classifier(
-                clf_name, copy.deepcopy(clf), label_name, calibrator, split_method, kfold, num_splits,
-                use_pca, n_components, feature_list, use_RFE, RFE_feature_number)
-            auroc_scores[combined_name] = auroc_list
+    for feature_set_name, feature_list in feature_sets.items():
+        print(f"\n--- Feature Set: {feature_set_name} ---")
+        for calibrator in calibrators:
+            for clf_name, clf in classifiers.items():
+                combined_name = f"{feature_set_name}_{clf_name}_{calibrator}{'_PCA' if use_pca else ''}"
+                metrics_list, auroc_list, auprc_list, feature_names, _, _ = train_and_evaluate_classifier(
+                    clf_name, copy.deepcopy(clf), label_name, calibrator, split_method, kfold, num_splits,
+                    use_pca, n_components, feature_list, use_RFE, RFE_feature_number)
+                auroc_scores[combined_name] = auroc_list
+                auprc_scores[combined_name] = auprc_list
 
     classifiers_list = list(auroc_scores.keys())
-    p_values = perform_statistical_tests(auroc_scores, classifiers_list)
+    p_values = perform_statistical_tests(auroc_scores, classifiers_list, "AUROC")
+    p_values = perform_statistical_tests(auprc_scores, classifiers_list, "AUPRC")
 
     preprocessor = DataPreprocessor(label_name=label_name, missing_method='median', normalize=True,
                                     feature_list=feature_list)
