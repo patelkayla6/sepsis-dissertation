@@ -12,7 +12,7 @@ file_path = '../data/sepsis_01NVa_Sep2024_CHENYANG.xlsx'
 
 def load_signal_features(usubjid, time_window=20, signal_type='PPG', lead=1):
     if signal_type == 'PPG':
-        hrv_file = f'../data/PPG/{usubjid}_hrv_{time_window}s.csv'
+        hrv_file = f'../data/PPG/{usubjid}_{time_window}s.csv'
     elif signal_type == 'ECG':
         hrv_file = f'../data/ECG/{usubjid}_ecg_lead{lead}_{time_window}s.csv'
     if not os.path.exists(hrv_file):
@@ -32,7 +32,7 @@ def load_signal_features(usubjid, time_window=20, signal_type='PPG', lead=1):
         'HRV_CD', 'HRV_HFD', 'HRV_KFD', 'HRV_LZC'
     ]
     if signal_type == 'PPG':
-        features_name = features_name + ['PAV']
+        pass
     elif signal_type == 'ECG':
         features_name = ['ECG_a_R', 'ECG_RR0', 'ECG_RR1', 'ECG_RR2', 'ECG_RRm', 'ECG_RR_0_1', 'ECG_RR_2_1', 'ECG_RR_m_1', 'ECG_t_PR', 
                         'ECG_t_QR', 'ECG_t_RS',	'ECG_t_RT', 'ECG_t_PQ', 'ECG_t_PS', 'ECG_t_PT', 'ECG_t_QS', 'ECG_t_QT', 'ECG_t_ST', 
@@ -145,7 +145,8 @@ def load_excel(time_window=20):
             hrv_features['USUBJID'] = usubjid
             signal_features.append(hrv_features)
     signal_features_df = pd.DataFrame(signal_features)
-    features = features.merge(signal_features_df, on='USUBJID', how='left')
+    if not signal_features_df.empty:
+        features = features.merge(signal_features_df, on='USUBJID', how='left')
 
     # Add ECG features for each patient
     signal_features = []
@@ -153,9 +154,10 @@ def load_excel(time_window=20):
         hrv_features = load_signal_features(usubjid, time_window=time_window, signal_type='ECG', lead=1)
         if hrv_features is not None:
             hrv_features['USUBJID'] = usubjid
-            signal_features.append(hrv_features)    
+            signal_features.append(hrv_features)
     signal_features_df = pd.DataFrame(signal_features)
-    features = features.merge(signal_features_df, on='USUBJID', how='left')
+    if not signal_features_df.empty:
+        features = features.merge(signal_features_df, on='USUBJID', how='left')
 
     # Add NEWS score and SOFA score for each patient
     news_csv = pd.read_csv('../data/SOFANEWS SCORES_CHENYANG_27.csv')
@@ -272,18 +274,18 @@ class DataPreprocessor:
             # Fill numerical columns with the median of the training set
             numerical_cols = self.X_train.select_dtypes(include=[np.number]).columns
             if len(numerical_cols) > 0:
-                num_imputer = SimpleImputer(strategy='median')
-                self.X_train[numerical_cols] = num_imputer.fit_transform(self.X_train[numerical_cols])
+                num_imputer = SimpleImputer(strategy='median', keep_empty_features=True)
+                self.X_train.loc[:, numerical_cols] = num_imputer.fit_transform(self.X_train[numerical_cols])
                 if not self.X_test.empty:
-                    self.X_test[numerical_cols] = num_imputer.transform(self.X_test[numerical_cols])
+                    self.X_test.loc[:, numerical_cols] = num_imputer.transform(self.X_test[numerical_cols])
 
             # Fill categorical columns with the mode of the training set
             categorical_cols = self.X_train.select_dtypes(include=['object']).columns
             if len(categorical_cols) > 0:
-                cat_imputer = SimpleImputer(strategy='most_frequent')
-                self.X_train[categorical_cols] = cat_imputer.fit_transform(self.X_train[categorical_cols])
+                cat_imputer = SimpleImputer(strategy='most_frequent', keep_empty_features=True)
+                self.X_train.loc[:, categorical_cols] = cat_imputer.fit_transform(self.X_train[categorical_cols])
                 if not self.X_test.empty:
-                    self.X_test[categorical_cols] = cat_imputer.transform(self.X_test[categorical_cols])
+                    self.X_test.loc[:, categorical_cols] = cat_imputer.transform(self.X_test[categorical_cols])
         else:
             raise ValueError('Invalid method to deal with missing values')
 
