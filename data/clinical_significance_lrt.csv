@@ -1,0 +1,2 @@
+model_full,model_reduced,lr_stat,df,p_value
+physiology_plus_SOFA_NEWS,physiology_only,3.7662942616533144,4,0.438557354126087
