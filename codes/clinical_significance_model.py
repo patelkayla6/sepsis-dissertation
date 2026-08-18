@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from scipy.stats import chi2
@@ -67,11 +68,15 @@ def fit_logistic_regression(X, y):
 
 
 def summarize_model(model, highlight_features=None):
+    conf_int = model.conf_int()  # 95% Wald CI on the log-odds scale, by default
     results = pd.DataFrame({
         'coef': model.params,
         'std_err': model.bse,
         'z': model.tvalues,
         'p_value': model.pvalues,
+        'odds_ratio': np.exp(model.params),
+        'or_ci_lower': np.exp(conf_int[0]),
+        'or_ci_upper': np.exp(conf_int[1]),
     })
     results['significant_p<0.05'] = results['p_value'] < 0.05
     print(results.round(4).to_string())
