@@ -10,7 +10,7 @@ from preprocessing_utils import flat_sqi
 from ppg_feature import PPG_feature
 from tqdm import tqdm
 
-base_path = '/mnt/netshare1/BSP/bspprojects20/public_datasets/VitalDB/RAW_DATA/'
+base_path = r'C:\oxford_dissertation\vital_sepsis\data\RAW_DATA'
 
 def find_patient_ppg_path(base_path, patient):
     # for folder in os.listdir(base_path):
@@ -21,7 +21,7 @@ def find_patient_ppg_path(base_path, patient):
     return None
 
 
-def sort_ppg_files(file_list):
+def sort_ppg_files(file_list): 
     # Extract a key from each filename to sort
     def get_sort_key(file_path):
         base_name = os.path.basename(file_path)
@@ -148,5 +148,7 @@ def save_ppg_features(patient, time_window=20):
 
 # # Example usage
 if __name__ == '__main__':
-    for i in range(1001, 1002): #45 is error
-        save_ppg_features(f"01NVa-003-{i}", time_window=20)
+    import re
+    for patient in sorted(os.listdir(base_path)):
+        if re.match(r'^\d{3}-\d{4}$', patient):
+            save_ppg_features(patient, time_window=20)

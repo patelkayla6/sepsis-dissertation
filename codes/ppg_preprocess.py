@@ -103,9 +103,9 @@ def compute_hrv_metrics(peaks_dict, sampling_rate):
 
 
 def save_ppg_features(patient, time_window=20):
-    if os.path.exists(f'../data/HRV/{patient}_hrv_{time_window}s.csv'):
+    if os.path.exists(rf'C:\oxford_dissertation\vital_sepsis\data\PPG_old\{patient}_hrv_{time_window}s.csv'):
         return
-    base_path = '../data/01NVa_Sepsis/RAW_DATA/'
+    base_path = r'C:\oxford_dissertation\vital_sepsis\data\RAW_DATA'
     path = find_patient_ppg_path(base_path, patient)
     if path is None:
         return
@@ -161,7 +161,7 @@ def save_ppg_features(patient, time_window=20):
         cols = hrv_df.columns.tolist()
         cols.remove("Time_Elapsed_Seconds")
         hrv_df = hrv_df[["Time_Elapsed_Seconds"] + cols]
-        output_path = '../data/HRV/'
+        output_path = r'C:\oxford_dissertation\vital_sepsis\data\PPG_old'
         if not os.path.exists(output_path):
             os.makedirs(output_path)
         hrv_df.to_csv(os.path.join(output_path, f"{patient}_hrv_{time_window}s.csv"), index=False)

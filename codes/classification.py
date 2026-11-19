@@ -1,8 +1,11 @@
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 from sklearn.metrics import (
     roc_auc_score, average_precision_score,
-    recall_score, f1_score, confusion_matrix, roc_curve
+    recall_score, f1_score, confusion_matrix, roc_curve, precision_recall_curve
 )
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
@@ -79,11 +82,23 @@ def fit_and_calibrate_classifier(clf, X_train, y_train, calibrator):
 
     return clf, calib_model, y_prob_train_cal
 
-def compute_optimal_threshold(y_train, y_prob_train_cal):
-    """Compute the optimal threshold based on the training data."""
-    fpr, tpr, thresholds = roc_curve(y_train, y_prob_train_cal)
-    optimal_idx = np.argmax(tpr - fpr)
-    return thresholds[optimal_idx]
+def compute_optimal_threshold(y_train, y_prob_train_cal, target_recall=0.90):
+    """Compute the decision threshold based on the training data."""
+    # Youden's J (balanced sensitivity/specificity tradeoff) -- commented out,
+    # not removed, in case we want to switch back or compare against it.
+    # fpr, tpr, thresholds = roc_curve(y_train, y_prob_train_cal)
+    # optimal_idx = np.argmax(tpr - fpr)
+    # return thresholds[optimal_idx]
+
+    # Recall-constrained: the highest threshold (best precision) that still
+    # catches at least `target_recall` of the positive cases (deaths) -- we'd
+    # rather over-alert than miss a death, so sensitivity is the floor and
+    # precision is only maximized subject to that floor.
+    precisions, recalls, thresholds = precision_recall_curve(y_train, y_prob_train_cal)
+    for t, p, r in zip(thresholds[::-1], precisions[-2::-1], recalls[-2::-1]):
+        if r >= target_recall:
+            return t
+    return 0.0  # target recall not achievable even by predicting everyone positive
 
 def predict_with_calibrator(clf, calib_model, X_test, calibrator):
     """Predict probabilities on test data and apply calibration."""
@@ -96,8 +111,11 @@ def predict_with_calibrator(clf, calib_model, X_test, calibrator):
         y_prob_cal = y_prob
     return y_prob_cal
 
-def process_single_split(preprocessor, clf, calibrator, use_pca, n_components, feature_names, use_RFE=False, RFE_feature_number=None):
-    """Process a single data split: train, optionally perform RFE, calibrate, and predict."""
+def process_single_split(preprocessor, clf, calibrator, use_pca, n_components, feature_names, use_RFE=False,
+                          RFE_feature_number=None, threshold_sink=None):
+    """Process a single data split: train, optionally perform RFE, calibrate, and predict.
+    If `threshold_sink` is a list, the computed decision threshold is appended to it --
+    return signature is otherwise unchanged so existing callers are unaffected."""
     X_train, X_test, y_train, y_test, feature_names = prepare_data(preprocessor, use_pca, n_components, feature_names)
 
     if use_RFE:
@@ -121,6 +139,8 @@ def process_single_split(preprocessor, clf, calibrator, use_pca, n_components, f
 
     # Compute the optimal threshold on the training set
     optimal_threshold = compute_optimal_threshold(y_train, y_prob_train_cal)
+    if threshold_sink is not None:
+        threshold_sink.append(optimal_threshold)
 
     # Predict on test set using the calibrator
     y_prob_cal = predict_with_calibrator(clf, calib_model, X_test, calibrator)
@@ -145,9 +165,12 @@ def compute_metrics(y_true, y_pred, y_prob):
     }
 
 def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', split_method='kfold', kfold=5,
-                                  num_splits=50, use_pca=False, n_components=None, feature_list=None, 
-                                  use_RFE=False, RFE_feature_number=None):
-    """Train and evaluate the classifier using specified cross-validation method."""
+                                  num_splits=50, use_pca=False, n_components=None, feature_list=None,
+                                  use_RFE=False, RFE_feature_number=None, time_cutoff_hours=None,
+                                  test_time_cutoff_hours=None, threshold_sink=None):
+    """Train and evaluate the classifier using specified cross-validation method.
+    If `threshold_sink` is a list, every fold's decision threshold is appended to it --
+    return signature is otherwise unchanged so existing callers are unaffected."""
     print(f"\nClassifier: {clf_name} "
           f"{f'with calibrator {calibrator}' if calibrator!='none' else ''} "
           f"{'with PCA' if use_pca else ''} "
@@ -159,7 +182,8 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
     feature_names = None
 
     preprocessor = DataPreprocessor(label_name=label_name, missing_method='median', normalize=True,
-                                    feature_list=feature_list)
+                                    feature_list=feature_list, time_cutoff_hours=time_cutoff_hours,
+                                    test_time_cutoff_hours=test_time_cutoff_hours)
     assert calibrator in ['none', 'platt', 'isotonic']
     assert split_method in ['kfold', 'leaveoneout']
 
@@ -172,7 +196,8 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
             preprocessor.split_data(method='leaveoneout', split_index=split_index)
             y_test, y_prob_cal, y_pred, feature_names = process_single_split(preprocessor, copy.deepcopy(clf),
                                                                              calibrator, use_pca, n_components,
-                                                                             feature_names, use_RFE, RFE_feature_number)
+                                                                             feature_names, use_RFE, RFE_feature_number,
+                                                                             threshold_sink=threshold_sink)
             y_true_list.append(y_test)
             y_prob_list.append(y_prob_cal)
             y_pred_list.append(y_pred)
@@ -200,7 +225,8 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
                 preprocessor.split_data(method='kfold', n_splits=kfold, split_index=split_index)
                 y_test, y_prob_cal, y_pred, feature_names = process_single_split(preprocessor, copy.deepcopy(clf),
                                                                                  calibrator, use_pca, n_components,
-                                                                                 feature_names, use_RFE, RFE_feature_number)
+                                                                                 feature_names, use_RFE, RFE_feature_number,
+                                                                                 threshold_sink=threshold_sink)
                 y_true_cv.append(y_test)
                 y_prob_cv.append(y_prob_cal)
                 y_pred_cv.append(y_pred)
@@ -229,23 +255,110 @@ def train_and_evaluate_classifier(clf_name, clf, label_name, calibrator='none', 
 
     return metrics_list, auroc_list, auprc_list, feature_names, np.concatenate(all_y_test), np.concatenate(all_y_prob)
 
+def evaluate_raw_score_baseline(score_col, label_name, split_method='kfold', kfold=10, num_splits=200,
+                                 time_cutoff_hours=None, test_time_cutoff_hours=None):
+    """Evaluate a raw clinical score (e.g. NEWS_ADM) as a baseline predictor -- no
+    model is fit, the raw value itself is used as the risk score, matching how it's
+    read at the bedside. Uses the same split_index sequence as train_and_evaluate_classifier
+    (same StratifiedKFold random_state per repeat) so its per-repeat AUROC/AUPRC are
+    paired with a trained model's for a valid Wilcoxon comparison. Sensitivity is
+    computed the same recall-constrained way as trained models: the threshold is
+    picked on each fold's training portion (via compute_optimal_threshold) and
+    applied to the held-out test portion."""
+    assert split_method == 'kfold'
+    preprocessor = DataPreprocessor(label_name=label_name, missing_method='median', normalize=False,
+                                     feature_list=[score_col], time_cutoff_hours=time_cutoff_hours,
+                                     test_time_cutoff_hours=test_time_cutoff_hours)
+    num_CVs = num_splits // kfold
+    auroc_list, auprc_list, sensitivity_list, specificity_list, f1_list = [], [], [], [], []
+    all_y_test, all_y_score = [], []
+
+    for cv_num in range(num_CVs):
+        y_true_cv, y_score_cv, y_pred_cv = [], [], []
+        for fold_num in range(kfold):
+            split_index = cv_num * kfold + fold_num
+            preprocessor.split_data(method='kfold', n_splits=kfold, split_index=split_index)
+            y_train = preprocessor.y_train.astype(int).to_numpy()
+            y_train_score = preprocessor.X_train[score_col].to_numpy()
+            threshold = compute_optimal_threshold(y_train, y_train_score)
+
+            y_test = preprocessor.y_test.astype(int).to_numpy()
+            y_score = preprocessor.X_test[score_col].to_numpy()
+            y_pred = (y_score >= threshold).astype(int)
+
+            y_true_cv.append(y_test)
+            y_score_cv.append(y_score)
+            y_pred_cv.append(y_pred)
+            all_y_test.append(y_test)
+            all_y_score.append(y_score)
+
+        y_true_cv = np.concatenate(y_true_cv)
+        y_score_cv = np.concatenate(y_score_cv)
+        y_pred_cv = np.concatenate(y_pred_cv)
+        tn, fp, fn, tp = confusion_matrix(y_true_cv, y_pred_cv).ravel()
+        auroc_list.append(roc_auc_score(y_true_cv, y_score_cv))
+        auprc_list.append(average_precision_score(y_true_cv, y_score_cv))
+        sensitivity_list.append(recall_score(y_true_cv, y_pred_cv))
+        specificity_list.append(tn / (tn + fp) if (tn + fp) > 0 else 0)
+        f1_list.append(f1_score(y_true_cv, y_pred_cv))
+
+    return (auroc_list, auprc_list, sensitivity_list, specificity_list, f1_list,
+            np.concatenate(all_y_test), np.concatenate(all_y_score))
+
+def plot_roc_curves_per_feature_set(roc_data, baseline_roc_data, out_dir='../figures'):
+    """One ROC-curve figure per feature set: one curve per classifier trained on
+    that feature set, plus dashed reference curves for the raw NEWS/SOFA baselines
+    (identical on every plot, since they don't depend on feature set)."""
+    for feature_set_name, clf_curves in roc_data.items():
+        plt.figure(figsize=(8, 6))
+
+        for clf_name, (y_test, y_prob) in clf_curves.items():
+            fpr, tpr, _ = roc_curve(y_test, y_prob)
+            auc = roc_auc_score(y_test, y_prob)
+            plt.plot(fpr, tpr, label=f"{clf_name} (AUC = {auc:.3f})")
+
+        for score_col, (y_test, y_score) in baseline_roc_data.items():
+            fpr, tpr, _ = roc_curve(y_test, y_score)
+            auc = roc_auc_score(y_test, y_score)
+            plt.plot(fpr, tpr, '--', label=f"{score_col} (AUC = {auc:.3f})")
+
+        plt.plot([0, 1], [0, 1], 'k:', linewidth=0.8)
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title(f'ROC curves — {feature_set_name}')
+        plt.legend(loc='lower right', fontsize=8)
+        plt.tight_layout()
+        plt.savefig(f'{out_dir}/roc_curve_{feature_set_name}.png', dpi=150)
+        plt.close()
+
+def write_metrics_excel(metric_scores, out_path):
+    """Write {metric_name: {combo_name: [per-repeat values]}} to one Excel file,
+    one sheet per metric, each row a combo's mean/std over its CV repeats."""
+    with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
+        for metric_name, scores in metric_scores.items():
+            rows = [
+                {'combo': combo, f'{metric_name}_mean': np.mean(values), f'{metric_name}_std': np.std(values)}
+                for combo, values in scores.items()
+            ]
+            pd.DataFrame(rows).to_excel(writer, sheet_name=metric_name, index=False)
+
 def perform_statistical_tests(scores, classifiers_list, metric='AUROC'):
     """Perform statistical tests between classifiers based on scores."""
     df = pd.DataFrame(scores)
     p_values = pd.DataFrame(index=classifiers_list, columns=classifiers_list)
 
-    print(f"\nP-values between classifiers based on {metric} scores:")
+    #print(f"\nP-values between classifiers based on {metric} scores:")
     for clf1, clf2 in combinations(classifiers_list, 2):
         stat, p = wilcoxon(df[clf1], df[clf2])
         p_values.loc[clf1, clf2] = p
         p_values.loc[clf2, clf1] = p
-        print(f"P-value between {clf1} and {clf2}: {p:.4f}")
+        #print(f"P-value between {clf1} and {clf2}: {p:.4f}")
 
     vals = p_values.to_numpy().copy()
     np.fill_diagonal(vals, np.nan)
     p_values[:] = vals
-    print("\nP-values matrix:")
-    print(p_values)
+    #print("\nP-values matrix:")
+    #print(p_values)
 
     return p_values
 
@@ -340,6 +453,7 @@ def main():
 
     feature_sets = {
         'Clinical':         normal_feature_names,
+        'Vitals':           all_vital_sign_feature_names,
         'PPG':              PPG_feature_names,
         'ECG':              ECG_feature_names,
         'PPG+ECG':          PPG_feature_names + ECG_feature_names,
@@ -347,8 +461,11 @@ def main():
         'Clinical+ECG':     normal_feature_names + ECG_feature_names,
         'Clinical+PPG+ECG': normal_feature_names + PPG_feature_names + ECG_feature_names,
     }
+    
 
-    auroc_scores, auprc_scores = {}, {}
+    auroc_scores, auprc_scores, sensitivity_scores, threshold_scores = {}, {}, {}, {}
+    specificity_scores, f1_scores = {}, {}
+    roc_data = {}
 
     split_method = 'kfold'
     kfold = 10
@@ -356,20 +473,55 @@ def main():
     use_RFE = False
     RFE_feature_number = 100
 
+    print("\n--- Raw clinical score baselines (NEWS/SOFA, no model fit) ---")
+    baseline_roc_data = {}
+    for score_col in sofa_feature_names:
+        auroc_list, auprc_list, sensitivity_list, specificity_list, f1_list, y_test_pooled, y_score_pooled = evaluate_raw_score_baseline(
+            score_col, label_name, split_method, kfold, num_splits)
+        auroc_scores[score_col] = auroc_list
+        auprc_scores[score_col] = auprc_list
+        sensitivity_scores[score_col] = sensitivity_list
+        specificity_scores[score_col] = specificity_list
+        f1_scores[score_col] = f1_list
+        baseline_roc_data[score_col] = (y_test_pooled, y_score_pooled)
+
     for feature_set_name, feature_list in feature_sets.items():
         print(f"\n--- Feature Set: {feature_set_name} ---")
+        roc_data[feature_set_name] = {}
         for calibrator in calibrators:
             for clf_name, clf in classifiers.items():
                 combined_name = f"{feature_set_name}_{clf_name}_{calibrator}{'_PCA' if use_pca else ''}"
-                metrics_list, auroc_list, auprc_list, feature_names, _, _ = train_and_evaluate_classifier(
+                threshold_list = []
+                metrics_list, auroc_list, auprc_list, feature_names, y_test_pooled, y_prob_pooled = train_and_evaluate_classifier(
                     clf_name, copy.deepcopy(clf), label_name, calibrator, split_method, kfold, num_splits,
-                    use_pca, n_components, feature_list, use_RFE, RFE_feature_number)
+                    use_pca, n_components, feature_list, use_RFE, RFE_feature_number,
+                    threshold_sink=threshold_list)
                 auroc_scores[combined_name] = auroc_list
                 auprc_scores[combined_name] = auprc_list
+                sensitivity_scores[combined_name] = [m['Sensitivity'] for m in metrics_list]
+                specificity_scores[combined_name] = [m['Specificity'] for m in metrics_list]
+                f1_scores[combined_name] = [m['F1-score'] for m in metrics_list]
+                threshold_scores[combined_name] = threshold_list
+                roc_data[feature_set_name][combined_name] = (y_test_pooled, y_prob_pooled)
 
     classifiers_list = list(auroc_scores.keys())
-    p_values = perform_statistical_tests(auroc_scores, classifiers_list, "AUROC")
-    p_values = perform_statistical_tests(auprc_scores, classifiers_list, "AUPRC")
+    p_values_auroc = perform_statistical_tests(auroc_scores, classifiers_list, "AUROC")
+    p_values_auprc = perform_statistical_tests(auprc_scores, classifiers_list, "AUPRC")
+    p_values_auroc.to_csv('../data/p_values_auroc.csv')
+    p_values_auprc.to_csv('../data/p_values_auprc.csv')
+    print("\nAUROC p-values written to ../data/p_values_auroc.csv")
+    print("AUPRC p-values written to ../data/p_values_auprc.csv")
+
+    write_metrics_excel(
+        {'AUROC': auroc_scores, 'AUPRC': auprc_scores, 'Sensitivity': sensitivity_scores,
+         'Specificity': specificity_scores, 'F1-score': f1_scores},
+        '../data/classification_results.xlsx'
+    )
+    print("AUROC/AUPRC/Sensitivity/Specificity/F1-score summary (incl. NEWS/SOFA baselines) written to "
+          "../data/classification_results.xlsx (one sheet per metric)")
+
+    plot_roc_curves_per_feature_set(roc_data, baseline_roc_data, out_dir='../figures')
+    print("\nPer-feature-set ROC curves written to ../figures/roc_curve_<feature_set>.png")
 
     preprocessor = DataPreprocessor(label_name=label_name, missing_method='median', normalize=True,
                                     feature_list=feature_list)

@@ -1,18 +1,34 @@
 import os
+import functools
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import StratifiedKFold, LeaveOneOut
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 
 # Path to the Excel file
 file_path = '../data/sepsis_01NVa_Sep2024_CHENYANG.xlsx'
 
-def load_signal_features(usubjid, time_window=20, signal_type='PPG', lead=1):
+def _aggregate_stats(X, y):
+    """Collapse a per-patient time series (X=elapsed time, y=values) into summary
+    stats. Used to turn windowed HRV/vital-sign readings into per-patient features."""
+    if len(y) == 0:
+        return {'mean': np.nan, 'var': np.nan, 'std': np.nan,
+                'median': np.nan, 'mad': np.nan, 'slope': np.nan}
+    median = np.median(y)
+    stats = {
+        'mean': y.mean(),
+        'var': y.var(),
+        'std': y.std(),
+        'median': median,
+        'mad': np.median(np.abs(y - median)),
+        'slope': np.polyfit(X.flatten(), y, 1)[0] if len(y) > 1 else np.nan,
+    }
+    return stats
+
+def load_signal_features(usubjid, time_window=20, signal_type='PPG', lead=1, time_cutoff_hours=None):
     if signal_type == 'PPG':
-        hrv_file = f'../data/PPG/{usubjid}_{time_window}s.csv'
+        hrv_file = f'../data/PPG/01NVa-{usubjid}_{time_window}s.csv'
     elif signal_type == 'ECG':
         hrv_file = f'../data/ECG/{usubjid}_ecg_lead{lead}_{time_window}s.csv'
     if not os.path.exists(hrv_file):
@@ -31,19 +47,21 @@ def load_signal_features(usubjid, time_window=20, signal_type='PPG', lead=1):
         'HRV_MFDFA_alpha1_Increment', 'HRV_ApEn', 'HRV_SampEn', 'HRV_ShanEn', 'HRV_FuzzyEn',
         'HRV_CD', 'HRV_HFD', 'HRV_KFD', 'HRV_LZC'
     ]
-    if signal_type == 'PPG':
-        pass
-    elif signal_type == 'ECG':
+    if signal_type == 'ECG':
         features_name = ['ECG_a_R', 'ECG_RR0', 'ECG_RR1', 'ECG_RR2', 'ECG_RRm', 'ECG_RR_0_1', 'ECG_RR_2_1', 'ECG_RR_m_1', 'ECG_t_PR', 
                         'ECG_t_QR', 'ECG_t_RS',	'ECG_t_RT', 'ECG_t_PQ', 'ECG_t_PS', 'ECG_t_PT', 'ECG_t_QS', 'ECG_t_QT', 'ECG_t_ST', 
                         'ECG_a_PQ', 'ECG_a_QR', 'ECG_a_RS', 'ECG_a_ST', 'ECG_a_PS', 'ECG_a_PT', 'ECG_a_QS', 'ECG_a_QT', 'ECG_a_ST_QS', 
                         'ECG_a_RS_QR'] + features_name
     data = pd.read_csv(hrv_file)
+    if time_cutoff_hours is not None:
+        data = data[data['Time_Elapsed_Seconds'] <= time_cutoff_hours * 3600]
     feature_dict = {}
     for feature in features_name:
         X = data['Time_Elapsed_Seconds'].values.reshape(-1, 1)
         if feature in data.columns:
-            y = data[feature].values
+            # coerce first: some HRV columns contain Excel formula-error strings
+            # (e.g. '#NAME?') instead of numbers, which np.isnan() can't handle
+            y = pd.to_numeric(data[feature], errors='coerce').values
         else:
             y = np.full_like(X, np.nan)
         # remove NaN values
@@ -56,11 +74,20 @@ def load_signal_features(usubjid, time_window=20, signal_type='PPG', lead=1):
             feature = f'PPG_{feature}'
         elif signal_type == 'ECG' and feature[:3] != 'ECG':
             feature = f'ECG_{feature}'
-        feature_dict[f'{feature}_mean'] = y.mean()
-        feature_dict[f'{feature}_var'] = y.var()
+        for stat_name, value in _aggregate_stats(X, y).items():
+            feature_dict[f'{feature}_{stat_name}'] = value
     return feature_dict
 
-def load_excel(time_window=20):
+@functools.lru_cache(maxsize=2)
+# Bounded to 2 (not unbounded, not 1): within a single cutoff's classifier/
+# feature-set grid, caching still avoids redundant re-reads; maxsize=2 also
+# covers DataPreprocessor's train+test dual-key pattern (a constant train-side
+# cutoff plus a varying test-side cutoff) without those two evicting each
+# other on every call. Unbounded caching previously retained every distinct
+# cutoff's full feature table for the rest of the process, causing memory to
+# grow across a multi-cutoff sweep until a large CSV read failed with an
+# out-of-memory error.
+def load_excel(time_window=20, time_cutoff_hours=None):
     # Load the Excel file
     excel_data = pd.ExcelFile(file_path)
     
@@ -105,7 +132,38 @@ def load_excel(time_window=20):
     feature_CLI = process_sheet('CLI', custom_processing=process_CLI, aggregate_func='first')
 
     # Process 'DAILY_VITAL' sheet
-    DAILY_VITAL = pd.read_excel(excel_data, 'DAILY_VITAL').drop(columns=['EVENT', 'DATE', 'TIME'])
+    # FIX (previously a future-data leak): DATE/TIME used to be dropped immediately,
+    # so MONITORING_* vitals were aggregated over the ENTIRE monitoring session
+    # regardless of `time_cutoff_hours` -- meaning the Clinical feature set silently
+    # used vitals recorded after the cutoff applied to PPG/ECG. We now reconstruct a
+    # real per-reading timestamp and truncate it the same way PPG/ECG already is.
+    DAILY_VITAL = pd.read_excel(excel_data, 'DAILY_VITAL')
+    DAILY_VITAL['Vital_Timestamp'] = pd.to_datetime(
+        DAILY_VITAL['DATE'].dt.strftime('%Y-%m-%d') + ' ' + DAILY_VITAL['TIME'].dt.strftime('%H:%M:%S')
+    )
+    DAILY_VITAL = DAILY_VITAL.drop(columns=['EVENT', 'DATE', 'TIME'])
+
+    # Per-patient monitoring start timestamp, used only to compute elapsed time for
+    # truncation below -- not merged into `features` as a model input.
+    monitoring_start = pd.read_excel(excel_data, 'HIST')[
+        ['USUBJID', 'MONITORING_START_DATE', 'MONITORING_START_TIME']
+    ].groupby('USUBJID').first().reset_index()
+    monitoring_start['Monitoring_Start_Timestamp'] = pd.to_datetime(
+        monitoring_start['MONITORING_START_DATE'].dt.strftime('%Y-%m-%d') + ' ' +
+        monitoring_start['MONITORING_START_TIME'].dt.strftime('%H:%M:%S')
+    )
+    DAILY_VITAL = DAILY_VITAL.merge(
+        monitoring_start[['USUBJID', 'Monitoring_Start_Timestamp']], on='USUBJID', how='left'
+    )
+    DAILY_VITAL['Elapsed_Hours'] = (
+        DAILY_VITAL['Vital_Timestamp'] - DAILY_VITAL['Monitoring_Start_Timestamp']
+    ).dt.total_seconds() / 3600
+    if time_cutoff_hours is not None:
+        # FIX: truncate vitals to the same observation window as PPG/ECG, so
+        # `Clinical`-containing feature sets stay consistent with the cutoff
+        # applied elsewhere instead of leaking later vitals from the same session.
+        DAILY_VITAL = DAILY_VITAL[DAILY_VITAL['Elapsed_Hours'] <= time_cutoff_hours]
+
     DAILY_VITAL['MONITORING_MAP'] = (
         DAILY_VITAL['MONITORING_SYSBP'] + 2 * DAILY_VITAL['MONITORING_DIABP']
     ) / 3
@@ -120,14 +178,10 @@ def load_excel(time_window=20):
         result = {'USUBJID': usubjid}
         for var in variables:
             valid_data = group[['VITAL_VITAL_SEQ', var]].dropna()
-            if valid_data.empty:
-                for stat in ['mean', 'var']:
-                    result[f'{var}_{stat}'] = np.nan
-                continue
             X = valid_data['VITAL_VITAL_SEQ'].values.reshape(-1, 1)
             y = valid_data[var].values
-            result[f'{var}_mean'] = y.mean()
-            result[f'{var}_var'] = y.var()
+            for stat_name, value in _aggregate_stats(X, y).items():
+                result[f'{var}_{stat_name}'] = value
         feature_DAILY_VITAL.append(result)
     feature_DAILY_VITAL = pd.DataFrame(feature_DAILY_VITAL)
 
@@ -140,7 +194,8 @@ def load_excel(time_window=20):
     # Add PPG features for each patient
     signal_features = []
     for usubjid in features['USUBJID']:
-        hrv_features = load_signal_features(usubjid, time_window=time_window, signal_type='PPG')
+        hrv_features = load_signal_features(usubjid, time_window=time_window, signal_type='PPG',
+                                             time_cutoff_hours=time_cutoff_hours)
         if hrv_features is not None:
             hrv_features['USUBJID'] = usubjid
             signal_features.append(hrv_features)
@@ -151,7 +206,8 @@ def load_excel(time_window=20):
     # Add ECG features for each patient
     signal_features = []
     for usubjid in features['USUBJID']:
-        hrv_features = load_signal_features(usubjid, time_window=time_window, signal_type='ECG', lead=1)
+        hrv_features = load_signal_features(usubjid, time_window=time_window, signal_type='ECG', lead=1,
+                                             time_cutoff_hours=time_cutoff_hours)
         if hrv_features is not None:
             hrv_features['USUBJID'] = usubjid
             signal_features.append(hrv_features)
@@ -198,11 +254,12 @@ def load_excel(time_window=20):
 
 
 class DataPreprocessor:
-    def __init__(self, label_name='DIED', missing_method='median', normalize=True, feature_list=None):
+    def __init__(self, label_name='DIED', missing_method='median', normalize=True, feature_list=None,
+                 time_cutoff_hours=None, test_time_cutoff_hours=None):
         assert label_name in ['DIED', 'HFNOV', 'MEVEN', 'OUTCOME', 'CULTURE_RESULT']
         assert missing_method in [None, 'median']
 
-        features, labels = load_excel(time_window=20)
+        features, labels = load_excel(time_window=20, time_cutoff_hours=time_cutoff_hours)
 
         if feature_list is not None:
             # only keep the features in the feature_list
@@ -227,6 +284,25 @@ class DataPreprocessor:
                 self.features, columns=categorical_cols, dummy_na=False, drop_first=True
             )
 
+        # Optionally source test-fold rows from a separately-truncated feature table,
+        # so the model can be trained on one time window (e.g. full recordings) and
+        # evaluated on a different, shorter window (e.g. the first 2 hours) for the
+        # same patients.
+        self.test_source_features = None
+        if test_time_cutoff_hours is not None:
+            test_features, _ = load_excel(time_window=20, time_cutoff_hours=test_time_cutoff_hours)
+            if feature_list is not None:
+                test_features = test_features[feature_list]
+            test_features = test_features.loc[ID_list]
+            test_categorical_cols = test_features.select_dtypes(include=['object']).columns
+            if len(test_categorical_cols) > 0:
+                test_features = pd.get_dummies(
+                    test_features, columns=test_categorical_cols, dummy_na=False, drop_first=True
+                )
+            # Align columns with the train-side feature table in case one-hot encoding
+            # produced a different set of dummy columns between the two cutoffs.
+            self.test_source_features = test_features.reindex(columns=self.features.columns, fill_value=0)
+
         # Initialize data splitting variables
         self.X_train, self.X_test, self.y_train, self.y_test = None, None, None, None
 
@@ -238,6 +314,7 @@ class DataPreprocessor:
 
     def split_data(self, method='kfold', n_splits=10, split_index=0):
         assert method in ['kfold', 'leaveoneout', 'full']
+        test_source = self.test_source_features if self.test_source_features is not None else self.features
         if method == 'kfold':
             assert n_splits >= 2
             cv = StratifiedKFold(
@@ -245,7 +322,7 @@ class DataPreprocessor:
             )
             splits = list(cv.split(self.features, self.labels))
             train_index, test_index = splits[split_index % n_splits]
-            self.X_train, self.X_test = self.features.iloc[train_index], self.features.iloc[test_index]
+            self.X_train, self.X_test = self.features.iloc[train_index], test_source.iloc[test_index]
             self.y_train, self.y_test = self.labels.iloc[train_index], self.labels.iloc[test_index]
         elif method == 'leaveoneout':
             cv = LeaveOneOut()
@@ -253,7 +330,7 @@ class DataPreprocessor:
             n_splits = len(splits)
             assert split_index < n_splits, "split_index out of range for leave-one-out cross-validation"
             train_index, test_index = splits[split_index]
-            self.X_train, self.X_test = self.features.iloc[train_index], self.features.iloc[test_index]
+            self.X_train, self.X_test = self.features.iloc[train_index], test_source.iloc[test_index]
             self.y_train, self.y_test = self.labels.iloc[train_index], self.labels.iloc[test_index]
         elif method == 'full':
             # Use the full dataset as the training set and create empty test sets
